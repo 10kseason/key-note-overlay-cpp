@@ -1,0 +1,23 @@
+# Build outputs
+build-cpp/
+build-cpp-ninja/
+dist/
+
+# Local runtime state
+key_note_cpp_config.ini
+key_note_cpp_selftest.ini
+key_note_cpp_selftest.log
+key_note_overlay_config.json
+key_note_overlay_debug.log
+*.log
+
+# Python prototype/cache files are kept local unless explicitly published.
+key_note_overlay.py
+key_note_obs_server.py
+run_key_note_overlay*.bat
+run_obs_browser_overlay*.bat
+send_test_keys.py
+__pycache__/
+
+# Local OBS/reference assets may contain machine paths or device names.
+참고/
