@@ -1,0 +1,11 @@
+lane_count_8k=8
+semicolon_vk=186
+A_registered=1
+Q_filtered=1
+five_key_ok=1
+ten_key_ok=1
+canonical_ok=1
+save_ok=1
+save_readback_ok=1
+hold_lifecycle_ok=1
+result=ok
