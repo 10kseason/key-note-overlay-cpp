@@ -8,6 +8,13 @@ Windows rhythm-game key overlay for OBS. It captures configured keyboard lanes w
 - 5K, 8K, and 10K presets
 - Custom lane order from left to right
 - Long-note rendering while a key is held
+- Long notes are split visually into head, low-alpha body, and tail cap
+- Box or circle note heads
+- Classic, Neon, and Minimal visual presets
+- Transparent lane background, thin note outline, and key press glow/pulse
+- Top or bottom compact key labels
+- Adjustable whole-overlay opacity
+- Chord alignment: keydowns within 15 ms render on the first keydown row
 - Adjustable overlay position, size, note travel, and release fade
 - Always-on-top and click-through overlay options
 - Separate capture-safe overlay/settings windows for OBS
@@ -48,6 +55,12 @@ Start the app, then use the settings window to configure:
 - overlay `x`, `y`, `width`, and `height`
 - release fade duration
 - note travel distance
+- note width and height
+- lane spacing percentage
+- visual preset: `Classic`, `Neon`, or `Minimal`
+- opacity percentage
+- circle note mode
+- lane background, rounded boxes, thin outline, and key label placement
 - debug background
 - click-through and always-on-top
 
@@ -70,30 +83,42 @@ Do not capture `Key Note Overlay C++ Settings`; that is only the configuration G
 The local runtime config is:
 
 ```text
-key_note_cpp_config.ini
+key_note_cpp_config.json
 ```
 
-That file is ignored by Git because it can contain personal key layout and capture settings. Use `key_note_cpp_config.example.ini` as a template.
+That file is ignored by Git because it can contain personal key layout and capture settings. Use `key_note_cpp_config.example.json` as a template. The app still writes `key_note_cpp_config.ini` for backward compatibility.
 
 Example:
 
-```ini
-[overlay]
-x=80
-y=40
-width=900
-height=220
-duration_ms=850
-travel_px=180
-note_width=58
-note_height=34
-debug_background=1
-click_through=1
-always_on_top=1
-
-[input]
-mode=8K
-lanes=A,S,D,F,J,K,L,SEMICOLON
+```json
+{
+  "overlay": {
+    "x": 80,
+    "y": 40,
+    "width": 900,
+    "height": 220,
+    "duration_ms": 850,
+    "travel_px": 180,
+    "note_width": 58,
+    "note_height": 34,
+    "visual_preset": "Classic",
+    "opacity_percent": 100,
+    "lane_spacing_percent": 100,
+    "long_note_alpha": 92,
+    "debug_background": true,
+    "click_through": true,
+    "always_on_top": true,
+    "circle_notes": false,
+    "lane_background": true,
+    "rounded_boxes": true,
+    "thin_outline": true,
+    "key_text_bottom": true
+  },
+  "input": {
+    "mode": "8K",
+    "lanes": ["A", "S", "D", "F", "J", "K", "L", "SEMICOLON"]
+  }
+}
 ```
 
 Special key names are normalized when saving. For example, `;` becomes `SEMICOLON` and `[` becomes `LBRACKET`.

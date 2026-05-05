@@ -1,0 +1,28 @@
+{
+  "overlay": {
+    "x": 80,
+    "y": 40,
+    "width": 900,
+    "height": 220,
+    "duration_ms": 850,
+    "travel_px": 180,
+    "note_width": 58,
+    "note_height": 34,
+    "visual_preset": "Classic",
+    "opacity_percent": 100,
+    "lane_spacing_percent": 100,
+    "long_note_alpha": 92,
+    "debug_background": true,
+    "click_through": true,
+    "always_on_top": true,
+    "circle_notes": false,
+    "lane_background": true,
+    "rounded_boxes": true,
+    "thin_outline": true,
+    "key_text_bottom": true
+  },
+  "input": {
+    "mode": "8K",
+    "lanes": ["A", "S", "D", "F", "J", "K", "L", "SEMICOLON"]
+  }
+}

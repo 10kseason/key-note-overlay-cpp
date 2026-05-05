@@ -48,8 +48,22 @@ constexpr int IDC_STATUS = 1014;
 constexpr int IDC_PRESET_5 = 1015;
 constexpr int IDC_PRESET_8 = 1016;
 constexpr int IDC_PRESET_10 = 1017;
+constexpr int IDC_CIRCLE_NOTES = 1018;
+constexpr int IDC_VIS_CLASSIC = 1019;
+constexpr int IDC_VIS_NEON = 1020;
+constexpr int IDC_VIS_MINIMAL = 1021;
+constexpr int IDC_OPACITY = 1022;
+constexpr int IDC_LANE_BG = 1023;
+constexpr int IDC_ROUNDED_BOXES = 1024;
+constexpr int IDC_THIN_OUTLINE = 1025;
+constexpr int IDC_KEY_TEXT_BOTTOM = 1026;
+constexpr int IDC_LANE_SPACING = 1027;
+constexpr int IDC_NOTE_WIDTH = 1028;
+constexpr int IDC_NOTE_HEIGHT = 1029;
 
 constexpr double kHoldThresholdMs = 90.0;
+constexpr double kChordAlignWindowMs = 15.0;
+constexpr double kPulseMs = 95.0;
 #ifndef WDA_EXCLUDEFROMCAPTURE
 constexpr DWORD WDA_EXCLUDEFROMCAPTURE = 0x00000011;
 #endif
@@ -69,10 +83,19 @@ struct Config {
     int travelPx = 180;
     int noteWidth = 58;
     int noteHeight = 34;
+    int opacityPercent = 100;
+    int laneSpacingPercent = 100;
+    int longNoteAlpha = 92;
     std::wstring mode = L"8K";
+    std::wstring visualPreset = L"Classic";
     bool debugBackground = true;
     bool clickThrough = true;
     bool alwaysOnTop = true;
+    bool circleNotes = false;
+    bool laneBackground = true;
+    bool roundedBoxes = true;
+    bool thinOutline = true;
+    bool keyTextBottom = true;
     std::wstring lanesText = L"A,S,D,F,J,K,L,SEMICOLON";
     std::vector<Lane> lanes;
 };
@@ -92,18 +115,35 @@ struct Preset {
     const wchar_t* lanes;
 };
 
+struct VisualTheme {
+    COLORREF background = RGB(28, 28, 28);
+    COLORREF laneFill = RGB(18, 24, 34);
+    COLORREF laneLine = RGB(68, 78, 92);
+    COLORREF outline = RGB(236, 244, 255);
+    COLORREF text = RGB(8, 17, 31);
+    COLORREF shadow = RGB(10, 12, 16);
+    int laneAlpha = 76;
+    int pulseAlpha = 112;
+};
+
 HINSTANCE gInstance = nullptr;
 HWND gSettingsWnd = nullptr;
 HWND gOverlayWnd = nullptr;
 HFONT gGuiFont = nullptr;
 HFONT gNoteFont = nullptr;
+HFONT gKeyFont = nullptr;
 Config gConfig;
 std::array<int, 256> gVkToLaneIndex{};
 std::array<bool, 256> gKeyDown{};
+std::array<double, 256> gPendingLaneDownMs{};
+std::array<double, 256> gPendingLaneUpMs{};
 HHOOK gKeyboardHook = nullptr;
 std::vector<Note> gNotes;
 std::wstring gConfigPath;
+std::wstring gIniConfigPath;
+std::wstring gJsonConfigPath;
 unsigned long long gNextNoteId = 1;
+double gChordAnchorMs = -1000000.0;
 
 const std::array<COLORREF, 8> kPalette = {
     RGB(88, 213, 255),
@@ -133,6 +173,34 @@ double NowMs() {
     return (static_cast<double>(now.QuadPart) * 1000.0) / static_cast<double>(freq.QuadPart);
 }
 
+int ClampInt(int value, int minValue, int maxValue) {
+    return std::max(minValue, std::min(maxValue, value));
+}
+
+COLORREF BlendColor(COLORREF fg, COLORREF bg, int alpha) {
+    alpha = ClampInt(alpha, 0, 255);
+    int r = GetRValue(fg) * alpha / 255 + GetRValue(bg) * (255 - alpha) / 255;
+    int g = GetGValue(fg) * alpha / 255 + GetGValue(bg) * (255 - alpha) / 255;
+    int b = GetBValue(fg) * alpha / 255 + GetBValue(bg) * (255 - alpha) / 255;
+    return RGB(r, g, b);
+}
+
+double AlignChordPressMs(double eventMs) {
+    if (eventMs - gChordAnchorMs > kChordAlignWindowMs) {
+        gChordAnchorMs = eventMs;
+    }
+    return gChordAnchorMs;
+}
+
+double TakePendingLaneTime(std::array<double, 256>& pending, int lane) {
+    if (lane < 0 || lane >= static_cast<int>(pending.size())) {
+        return NowMs();
+    }
+    double eventMs = pending[static_cast<size_t>(lane)];
+    pending[static_cast<size_t>(lane)] = 0.0;
+    return eventMs > 0.0 ? eventMs : NowMs();
+}
+
 std::wstring ExeDirectory() {
     std::wstring path(MAX_PATH, L'\0');
     DWORD len = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
@@ -154,6 +222,183 @@ std::wstring CurrentDirectory() {
     return path + L"\\";
 }
 
+std::wstring WidenAscii(const std::string& value) {
+    std::wstring out;
+    out.reserve(value.size());
+    for (unsigned char c : value) {
+        out.push_back(static_cast<wchar_t>(c));
+    }
+    return out;
+}
+
+bool ReadTextFile(const std::wstring& path, std::string& out) {
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(file, &size) || size.QuadPart < 0 || size.QuadPart > 1024 * 1024) {
+        CloseHandle(file);
+        return false;
+    }
+    out.assign(static_cast<size_t>(size.QuadPart), '\0');
+    DWORD read = 0;
+    BOOL ok = out.empty() || ReadFile(file, out.data(), static_cast<DWORD>(out.size()), &read, nullptr);
+    CloseHandle(file);
+    if (!ok) {
+        out.clear();
+        return false;
+    }
+    out.resize(read);
+    return true;
+}
+
+bool WriteTextFile(const std::wstring& path, const std::string& text) {
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    DWORD written = 0;
+    BOOL ok = text.empty() || WriteFile(file, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
+    CloseHandle(file);
+    return ok && written == text.size();
+}
+
+void JsonSkipWs(const std::string& text, size_t& pos) {
+    while (pos < text.size() && (text[pos] == ' ' || text[pos] == '\n' || text[pos] == '\r' || text[pos] == '\t')) {
+        ++pos;
+    }
+}
+
+size_t JsonValuePos(const std::string& text, const char* key) {
+    std::string needle = std::string("\"") + key + "\"";
+    size_t pos = text.find(needle);
+    if (pos == std::string::npos) {
+        return std::string::npos;
+    }
+    pos = text.find(':', pos + needle.size());
+    if (pos == std::string::npos) {
+        return std::string::npos;
+    }
+    ++pos;
+    JsonSkipWs(text, pos);
+    return pos;
+}
+
+bool JsonReadStringAt(const std::string& text, size_t& pos, std::string& out) {
+    JsonSkipWs(text, pos);
+    if (pos >= text.size() || text[pos] != '"') {
+        return false;
+    }
+    ++pos;
+    out.clear();
+    while (pos < text.size()) {
+        char c = text[pos++];
+        if (c == '"') {
+            return true;
+        }
+        if (c == '\\' && pos < text.size()) {
+            char escaped = text[pos++];
+            if (escaped == 'n') out.push_back('\n');
+            else if (escaped == 'r') out.push_back('\r');
+            else if (escaped == 't') out.push_back('\t');
+            else out.push_back(escaped);
+        } else {
+            out.push_back(c);
+        }
+    }
+    return false;
+}
+
+bool JsonReadString(const std::string& text, const char* key, std::string& out) {
+    size_t pos = JsonValuePos(text, key);
+    return pos != std::string::npos && JsonReadStringAt(text, pos, out);
+}
+
+bool JsonReadInt(const std::string& text, const char* key, int& out) {
+    size_t pos = JsonValuePos(text, key);
+    if (pos == std::string::npos) {
+        return false;
+    }
+    bool negative = pos < text.size() && text[pos] == '-';
+    if (negative) ++pos;
+    if (pos >= text.size() || text[pos] < '0' || text[pos] > '9') {
+        return false;
+    }
+    int value = 0;
+    while (pos < text.size() && text[pos] >= '0' && text[pos] <= '9') {
+        value = value * 10 + (text[pos++] - '0');
+    }
+    out = negative ? -value : value;
+    return true;
+}
+
+bool JsonReadBool(const std::string& text, const char* key, bool& out) {
+    size_t pos = JsonValuePos(text, key);
+    if (pos == std::string::npos) {
+        return false;
+    }
+    if (text.compare(pos, 4, "true") == 0) {
+        out = true;
+        return true;
+    }
+    if (text.compare(pos, 5, "false") == 0) {
+        out = false;
+        return true;
+    }
+    return false;
+}
+
+bool JsonReadStringArray(const std::string& text, const char* key, std::vector<std::string>& out) {
+    size_t pos = JsonValuePos(text, key);
+    if (pos == std::string::npos || pos >= text.size() || text[pos] != '[') {
+        return false;
+    }
+    ++pos;
+    out.clear();
+    while (pos < text.size()) {
+        JsonSkipWs(text, pos);
+        if (pos < text.size() && text[pos] == ']') {
+            return true;
+        }
+        std::string value;
+        if (!JsonReadStringAt(text, pos, value)) {
+            return false;
+        }
+        out.push_back(value);
+        JsonSkipWs(text, pos);
+        if (pos < text.size() && text[pos] == ',') {
+            ++pos;
+            continue;
+        }
+        if (pos < text.size() && text[pos] == ']') {
+            return true;
+        }
+        return false;
+    }
+    return false;
+}
+
+std::string JsonEscape(const std::wstring& value) {
+    std::string out;
+    for (wchar_t wc : value) {
+        char c = wc <= 127 ? static_cast<char>(wc) : '?';
+        if (c == '"' || c == '\\') {
+            out.push_back('\\');
+            out.push_back(c);
+        } else if (c == '\n') {
+            out += "\\n";
+        } else if (c == '\r') {
+            out += "\\r";
+        } else if (c == '\t') {
+            out += "\\t";
+        } else {
+            out.push_back(c);
+        }
+    }
+    return out;
+}
+
 std::wstring Trim(std::wstring value) {
     auto first = std::find_if_not(value.begin(), value.end(), [](wchar_t c) {
         return std::iswspace(c) != 0;
@@ -172,6 +417,74 @@ std::wstring Upper(std::wstring value) {
         return static_cast<wchar_t>(std::towupper(c));
     });
     return value;
+}
+
+std::wstring NormalizeVisualPreset(const std::wstring& raw) {
+    std::wstring preset = Upper(Trim(raw));
+    if (preset == L"NEON") return L"Neon";
+    if (preset == L"MINIMAL") return L"Minimal";
+    return L"Classic";
+}
+
+VisualTheme CurrentTheme() {
+    std::wstring preset = NormalizeVisualPreset(gConfig.visualPreset);
+    if (preset == L"Neon") {
+        return VisualTheme{
+            RGB(8, 10, 18),
+            RGB(4, 20, 36),
+            RGB(34, 211, 238),
+            RGB(165, 243, 252),
+            RGB(3, 7, 18),
+            RGB(2, 6, 23),
+            88,
+            150
+        };
+    }
+    if (preset == L"Minimal") {
+        return VisualTheme{
+            RGB(22, 22, 22),
+            RGB(24, 24, 24),
+            RGB(82, 82, 82),
+            RGB(214, 214, 214),
+            RGB(18, 18, 18),
+            RGB(8, 8, 8),
+            48,
+            72
+        };
+    }
+    return VisualTheme{};
+}
+
+void ApplyVisualPreset(const std::wstring& rawPreset) {
+    gConfig.visualPreset = NormalizeVisualPreset(rawPreset);
+    if (gConfig.visualPreset == L"Neon") {
+        gConfig.opacityPercent = 94;
+        gConfig.laneSpacingPercent = 104;
+        gConfig.longNoteAlpha = 76;
+        gConfig.circleNotes = true;
+        gConfig.laneBackground = true;
+        gConfig.roundedBoxes = true;
+        gConfig.thinOutline = true;
+        gConfig.keyTextBottom = true;
+    } else if (gConfig.visualPreset == L"Minimal") {
+        gConfig.opacityPercent = 86;
+        gConfig.laneSpacingPercent = 92;
+        gConfig.longNoteAlpha = 58;
+        gConfig.circleNotes = false;
+        gConfig.laneBackground = false;
+        gConfig.roundedBoxes = true;
+        gConfig.thinOutline = true;
+        gConfig.keyTextBottom = false;
+    } else {
+        gConfig.opacityPercent = 100;
+        gConfig.laneSpacingPercent = 100;
+        gConfig.longNoteAlpha = 92;
+        gConfig.circleNotes = false;
+        gConfig.laneBackground = true;
+        gConfig.roundedBoxes = true;
+        gConfig.thinOutline = true;
+        gConfig.keyTextBottom = true;
+    }
 }
 
 std::wstring NormalizeToken(const std::wstring& raw) {
@@ -311,26 +624,54 @@ std::wstring CanonicalLaneText() {
 
 std::wstring ReadIniString(const wchar_t* section, const wchar_t* key, const wchar_t* fallback) {
     std::array<wchar_t, 512> buffer{};
-    GetPrivateProfileStringW(section, key, fallback, buffer.data(), static_cast<DWORD>(buffer.size()), gConfigPath.c_str());
+    GetPrivateProfileStringW(section, key, fallback, buffer.data(), static_cast<DWORD>(buffer.size()), gIniConfigPath.c_str());
     return buffer.data();
 }
 
 int ReadIniInt(const wchar_t* section, const wchar_t* key, int fallback) {
-    return static_cast<int>(GetPrivateProfileIntW(section, key, fallback, gConfigPath.c_str()));
+    return static_cast<int>(GetPrivateProfileIntW(section, key, fallback, gIniConfigPath.c_str()));
 }
 
 bool ReadIniBool(const wchar_t* section, const wchar_t* key, bool fallback) {
     return ReadIniInt(section, key, fallback ? 1 : 0) != 0;
 }
 
-void LoadConfig() {
-    gConfigPath = ExeDirectory() + L"key_note_cpp_config.ini";
-    if (GetFileAttributesW(gConfigPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        std::wstring currentConfig = CurrentDirectory() + L"key_note_cpp_config.ini";
-        if (GetFileAttributesW(currentConfig.c_str()) != INVALID_FILE_ATTRIBUTES) {
-            gConfigPath = currentConfig;
-        }
+void ClampAndRebuildConfig() {
+    gConfig.visualPreset = NormalizeVisualPreset(gConfig.visualPreset);
+    gConfig.width = std::max(240, gConfig.width);
+    gConfig.height = std::max(90, gConfig.height);
+    gConfig.durationMs = std::max(120, gConfig.durationMs);
+    gConfig.travelPx = std::max(40, gConfig.travelPx);
+    gConfig.noteWidth = ClampInt(gConfig.noteWidth, 24, 220);
+    gConfig.noteHeight = ClampInt(gConfig.noteHeight, 18, 140);
+    gConfig.opacityPercent = ClampInt(gConfig.opacityPercent, 20, 100);
+    gConfig.laneSpacingPercent = ClampInt(gConfig.laneSpacingPercent, 50, 160);
+    gConfig.longNoteAlpha = ClampInt(gConfig.longNoteAlpha, 32, 180);
+    RebuildLaneConfig();
+}
+
+void ResolveConfigPaths() {
+    std::wstring exeDir = ExeDirectory();
+    std::wstring curDir = CurrentDirectory();
+    std::wstring exeJson = exeDir + L"key_note_cpp_config.json";
+    std::wstring exeIni = exeDir + L"key_note_cpp_config.ini";
+    std::wstring curJson = curDir + L"key_note_cpp_config.json";
+    std::wstring curIni = curDir + L"key_note_cpp_config.ini";
+
+    if (GetFileAttributesW(exeJson.c_str()) != INVALID_FILE_ATTRIBUTES || GetFileAttributesW(exeIni.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        gJsonConfigPath = exeJson;
+        gIniConfigPath = exeIni;
+    } else if (GetFileAttributesW(curJson.c_str()) != INVALID_FILE_ATTRIBUTES || GetFileAttributesW(curIni.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        gJsonConfigPath = curJson;
+        gIniConfigPath = curIni;
+    } else {
+        gJsonConfigPath = exeJson;
+        gIniConfigPath = exeIni;
     }
+    gConfigPath = gJsonConfigPath;
+}
+
+void LoadIniConfig() {
     gConfig.x = ReadIniInt(L"overlay", L"x", gConfig.x);
     gConfig.y = ReadIniInt(L"overlay", L"y", gConfig.y);
     gConfig.width = ReadIniInt(L"overlay", L"width", gConfig.width);
@@ -339,32 +680,90 @@ void LoadConfig() {
     gConfig.travelPx = ReadIniInt(L"overlay", L"travel_px", gConfig.travelPx);
     gConfig.noteWidth = ReadIniInt(L"overlay", L"note_width", gConfig.noteWidth);
     gConfig.noteHeight = ReadIniInt(L"overlay", L"note_height", gConfig.noteHeight);
+    gConfig.visualPreset = ReadIniString(L"overlay", L"visual_preset", gConfig.visualPreset.c_str());
+    ApplyVisualPreset(gConfig.visualPreset);
+    gConfig.opacityPercent = ReadIniInt(L"overlay", L"opacity_percent", gConfig.opacityPercent);
+    gConfig.laneSpacingPercent = ReadIniInt(L"overlay", L"lane_spacing_percent", gConfig.laneSpacingPercent);
+    gConfig.longNoteAlpha = ReadIniInt(L"overlay", L"long_note_alpha", gConfig.longNoteAlpha);
     gConfig.debugBackground = ReadIniBool(L"overlay", L"debug_background", gConfig.debugBackground);
     gConfig.clickThrough = ReadIniBool(L"overlay", L"click_through", gConfig.clickThrough);
     gConfig.alwaysOnTop = ReadIniBool(L"overlay", L"always_on_top", gConfig.alwaysOnTop);
+    gConfig.circleNotes = ReadIniBool(L"overlay", L"circle_notes", gConfig.circleNotes);
+    gConfig.laneBackground = ReadIniBool(L"overlay", L"lane_background", gConfig.laneBackground);
+    gConfig.roundedBoxes = ReadIniBool(L"overlay", L"rounded_boxes", gConfig.roundedBoxes);
+    gConfig.thinOutline = ReadIniBool(L"overlay", L"thin_outline", gConfig.thinOutline);
+    gConfig.keyTextBottom = ReadIniBool(L"overlay", L"key_text_bottom", gConfig.keyTextBottom);
     gConfig.mode = ReadIniString(L"input", L"mode", gConfig.mode.c_str());
     gConfig.lanesText = ReadIniString(L"input", L"lanes", gConfig.lanesText.c_str());
+}
 
-    gConfig.width = std::max(240, gConfig.width);
-    gConfig.height = std::max(90, gConfig.height);
-    gConfig.durationMs = std::max(120, gConfig.durationMs);
-    gConfig.travelPx = std::max(40, gConfig.travelPx);
-    gConfig.noteWidth = std::max(24, gConfig.noteWidth);
-    gConfig.noteHeight = std::max(18, gConfig.noteHeight);
-    RebuildLaneConfig();
+bool LoadJsonConfig() {
+    std::string json;
+    if (!ReadTextFile(gJsonConfigPath, json)) {
+        return false;
+    }
+    int intValue = 0;
+    bool boolValue = false;
+    std::string stringValue;
+
+    if (JsonReadInt(json, "x", intValue)) gConfig.x = intValue;
+    if (JsonReadInt(json, "y", intValue)) gConfig.y = intValue;
+    if (JsonReadInt(json, "width", intValue)) gConfig.width = intValue;
+    if (JsonReadInt(json, "height", intValue)) gConfig.height = intValue;
+    if (JsonReadInt(json, "duration_ms", intValue)) gConfig.durationMs = intValue;
+    if (JsonReadInt(json, "travel_px", intValue)) gConfig.travelPx = intValue;
+    if (JsonReadInt(json, "note_width", intValue)) gConfig.noteWidth = intValue;
+    if (JsonReadInt(json, "note_height", intValue)) gConfig.noteHeight = intValue;
+    if (JsonReadString(json, "visual_preset", stringValue)) {
+        gConfig.visualPreset = WidenAscii(stringValue);
+        ApplyVisualPreset(gConfig.visualPreset);
+    }
+    if (JsonReadInt(json, "opacity_percent", intValue)) gConfig.opacityPercent = intValue;
+    if (JsonReadInt(json, "lane_spacing_percent", intValue)) gConfig.laneSpacingPercent = intValue;
+    if (JsonReadInt(json, "long_note_alpha", intValue)) gConfig.longNoteAlpha = intValue;
+    if (JsonReadBool(json, "debug_background", boolValue)) gConfig.debugBackground = boolValue;
+    if (JsonReadBool(json, "click_through", boolValue)) gConfig.clickThrough = boolValue;
+    if (JsonReadBool(json, "always_on_top", boolValue)) gConfig.alwaysOnTop = boolValue;
+    if (JsonReadBool(json, "circle_notes", boolValue)) gConfig.circleNotes = boolValue;
+    if (JsonReadBool(json, "lane_background", boolValue)) gConfig.laneBackground = boolValue;
+    if (JsonReadBool(json, "rounded_boxes", boolValue)) gConfig.roundedBoxes = boolValue;
+    if (JsonReadBool(json, "thin_outline", boolValue)) gConfig.thinOutline = boolValue;
+    if (JsonReadBool(json, "key_text_bottom", boolValue)) gConfig.keyTextBottom = boolValue;
+    if (JsonReadString(json, "mode", stringValue)) gConfig.mode = WidenAscii(stringValue);
+
+    std::vector<std::string> laneTokens;
+    if (JsonReadStringArray(json, "lanes", laneTokens) && !laneTokens.empty()) {
+        std::wstring lanes;
+        for (const std::string& lane : laneTokens) {
+            if (!lanes.empty()) lanes += L",";
+            lanes += WidenAscii(lane);
+        }
+        gConfig.lanesText = lanes;
+    } else if (JsonReadString(json, "lanes", stringValue)) {
+        gConfig.lanesText = WidenAscii(stringValue);
+    }
+    return true;
+}
+
+void LoadConfig() {
+    ResolveConfigPaths();
+    if (!LoadJsonConfig()) {
+        LoadIniConfig();
+    }
+    ClampAndRebuildConfig();
 }
 
 bool WriteIniInt(const wchar_t* section, const wchar_t* key, int value) {
     wchar_t buffer[32]{};
     wsprintfW(buffer, L"%d", value);
-    return WritePrivateProfileStringW(section, key, buffer, gConfigPath.c_str()) != FALSE;
+    return WritePrivateProfileStringW(section, key, buffer, gIniConfigPath.c_str()) != FALSE;
 }
 
 bool WriteIniBool(const wchar_t* section, const wchar_t* key, bool value) {
-    return WritePrivateProfileStringW(section, key, value ? L"1" : L"0", gConfigPath.c_str()) != FALSE;
+    return WritePrivateProfileStringW(section, key, value ? L"1" : L"0", gIniConfigPath.c_str()) != FALSE;
 }
 
-bool SaveConfig() {
+bool SaveIniConfig() {
     bool ok = true;
     ok = WriteIniInt(L"overlay", L"x", gConfig.x) && ok;
     ok = WriteIniInt(L"overlay", L"y", gConfig.y) && ok;
@@ -374,13 +773,70 @@ bool SaveConfig() {
     ok = WriteIniInt(L"overlay", L"travel_px", gConfig.travelPx) && ok;
     ok = WriteIniInt(L"overlay", L"note_width", gConfig.noteWidth) && ok;
     ok = WriteIniInt(L"overlay", L"note_height", gConfig.noteHeight) && ok;
+    ok = (WritePrivateProfileStringW(L"overlay", L"visual_preset", gConfig.visualPreset.c_str(), gIniConfigPath.c_str()) != FALSE) && ok;
+    ok = WriteIniInt(L"overlay", L"opacity_percent", gConfig.opacityPercent) && ok;
+    ok = WriteIniInt(L"overlay", L"lane_spacing_percent", gConfig.laneSpacingPercent) && ok;
+    ok = WriteIniInt(L"overlay", L"long_note_alpha", gConfig.longNoteAlpha) && ok;
     ok = WriteIniBool(L"overlay", L"debug_background", gConfig.debugBackground) && ok;
     ok = WriteIniBool(L"overlay", L"click_through", gConfig.clickThrough) && ok;
     ok = WriteIniBool(L"overlay", L"always_on_top", gConfig.alwaysOnTop) && ok;
-    ok = (WritePrivateProfileStringW(L"input", L"mode", gConfig.mode.c_str(), gConfigPath.c_str()) != FALSE) && ok;
-    ok = (WritePrivateProfileStringW(L"input", L"lanes", gConfig.lanesText.c_str(), gConfigPath.c_str()) != FALSE) && ok;
-    WritePrivateProfileStringW(nullptr, nullptr, nullptr, gConfigPath.c_str());
+    ok = WriteIniBool(L"overlay", L"circle_notes", gConfig.circleNotes) && ok;
+    ok = WriteIniBool(L"overlay", L"lane_background", gConfig.laneBackground) && ok;
+    ok = WriteIniBool(L"overlay", L"rounded_boxes", gConfig.roundedBoxes) && ok;
+    ok = WriteIniBool(L"overlay", L"thin_outline", gConfig.thinOutline) && ok;
+    ok = WriteIniBool(L"overlay", L"key_text_bottom", gConfig.keyTextBottom) && ok;
+    ok = (WritePrivateProfileStringW(L"input", L"mode", gConfig.mode.c_str(), gIniConfigPath.c_str()) != FALSE) && ok;
+    ok = (WritePrivateProfileStringW(L"input", L"lanes", gConfig.lanesText.c_str(), gIniConfigPath.c_str()) != FALSE) && ok;
+    WritePrivateProfileStringW(nullptr, nullptr, nullptr, gIniConfigPath.c_str());
     return ok;
+}
+
+std::string BoolText(bool value) {
+    return value ? "true" : "false";
+}
+
+bool SaveJsonConfig() {
+    std::ostringstream out;
+    out << "{\n";
+    out << "  \"overlay\": {\n";
+    out << "    \"x\": " << gConfig.x << ",\n";
+    out << "    \"y\": " << gConfig.y << ",\n";
+    out << "    \"width\": " << gConfig.width << ",\n";
+    out << "    \"height\": " << gConfig.height << ",\n";
+    out << "    \"duration_ms\": " << gConfig.durationMs << ",\n";
+    out << "    \"travel_px\": " << gConfig.travelPx << ",\n";
+    out << "    \"note_width\": " << gConfig.noteWidth << ",\n";
+    out << "    \"note_height\": " << gConfig.noteHeight << ",\n";
+    out << "    \"visual_preset\": \"" << JsonEscape(gConfig.visualPreset) << "\",\n";
+    out << "    \"opacity_percent\": " << gConfig.opacityPercent << ",\n";
+    out << "    \"lane_spacing_percent\": " << gConfig.laneSpacingPercent << ",\n";
+    out << "    \"long_note_alpha\": " << gConfig.longNoteAlpha << ",\n";
+    out << "    \"debug_background\": " << BoolText(gConfig.debugBackground) << ",\n";
+    out << "    \"click_through\": " << BoolText(gConfig.clickThrough) << ",\n";
+    out << "    \"always_on_top\": " << BoolText(gConfig.alwaysOnTop) << ",\n";
+    out << "    \"circle_notes\": " << BoolText(gConfig.circleNotes) << ",\n";
+    out << "    \"lane_background\": " << BoolText(gConfig.laneBackground) << ",\n";
+    out << "    \"rounded_boxes\": " << BoolText(gConfig.roundedBoxes) << ",\n";
+    out << "    \"thin_outline\": " << BoolText(gConfig.thinOutline) << ",\n";
+    out << "    \"key_text_bottom\": " << BoolText(gConfig.keyTextBottom) << "\n";
+    out << "  },\n";
+    out << "  \"input\": {\n";
+    out << "    \"mode\": \"" << JsonEscape(gConfig.mode) << "\",\n";
+    out << "    \"lanes\": [";
+    std::vector<std::wstring> lanes = SplitLaneText(CanonicalLaneText());
+    for (size_t i = 0; i < lanes.size(); ++i) {
+        if (i != 0) out << ", ";
+        out << "\"" << JsonEscape(lanes[i]) << "\"";
+    }
+    out << "]\n";
+    out << "  }\n";
+    out << "}\n";
+    return WriteTextFile(gJsonConfigPath, out.str());
+}
+
+bool SaveConfig() {
+    ClampAndRebuildConfig();
+    return SaveJsonConfig() && SaveIniConfig();
 }
 
 void SetStatus(const std::wstring& text) {
@@ -434,7 +890,8 @@ void ApplyOverlayWindowStyle() {
         ex &= ~WS_EX_TRANSPARENT;
     }
     SetWindowLongPtrW(gOverlayWnd, GWL_EXSTYLE, ex);
-    SetLayeredWindowAttributes(gOverlayWnd, kTransparentKey, 0, LWA_COLORKEY);
+    BYTE opacity = static_cast<BYTE>(ClampInt(gConfig.opacityPercent, 20, 100) * 255 / 100);
+    SetLayeredWindowAttributes(gOverlayWnd, kTransparentKey, opacity, LWA_COLORKEY | LWA_ALPHA);
 
     SetWindowPos(
         gOverlayWnd,
@@ -446,6 +903,14 @@ void ApplyOverlayWindowStyle() {
         SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED
     );
     InvalidateRect(gOverlayWnd, nullptr, FALSE);
+}
+
+void ResetInputRuntimeState() {
+    gNotes.clear();
+    gKeyDown.fill(false);
+    gPendingLaneDownMs.fill(0.0);
+    gPendingLaneUpMs.fill(0.0);
+    gChordAnchorMs = -1000000.0;
 }
 
 Note* FindActiveNote(int lane) {
@@ -465,10 +930,11 @@ void BeginLaneHold(int lane) {
         return;
     }
     Note note;
+    double eventMs = TakePendingLaneTime(gPendingLaneDownMs, lane);
     note.id = gNextNoteId++;
     note.lane = lane;
     note.label = gConfig.lanes[static_cast<size_t>(lane)].label;
-    note.pressMs = NowMs();
+    note.pressMs = AlignChordPressMs(eventMs);
     note.releaseMs = -1.0;
     note.held = true;
     note.color = kPalette[static_cast<size_t>(lane) % kPalette.size()];
@@ -489,7 +955,7 @@ void EndLaneHold(int lane) {
         return;
     }
     note->held = false;
-    note->releaseMs = NowMs();
+    note->releaseMs = std::max(note->pressMs, TakePendingLaneTime(gPendingLaneUpMs, lane));
     InvalidateRect(gOverlayWnd, nullptr, FALSE);
     UpdateWindow(gOverlayWnd);
 }
@@ -499,10 +965,11 @@ void SpawnTapNote(int lane) {
         return;
     }
     Note note;
+    double eventMs = AlignChordPressMs(NowMs());
     note.id = gNextNoteId++;
     note.lane = lane;
     note.label = gConfig.lanes[static_cast<size_t>(lane)].label;
-    note.pressMs = NowMs();
+    note.pressMs = eventMs;
     note.releaseMs = note.pressMs + 40.0;
     note.held = false;
     note.color = kPalette[static_cast<size_t>(lane) % kPalette.size()];
@@ -514,11 +981,20 @@ void SpawnTapNote(int lane) {
     UpdateWindow(gOverlayWnd);
 }
 
-void DrawCenteredText(HDC dc, const RECT& rect, const std::wstring& text, COLORREF color) {
+void DrawKeyLabel(HDC dc, const RECT& body, const std::wstring& text, COLORREF color) {
+    RECT rect = body;
+    if (gConfig.keyTextBottom) {
+        rect.top = std::max(rect.top, rect.bottom - 17);
+        rect.bottom -= 2;
+    } else {
+        rect.top += 2;
+        rect.bottom = std::min(rect.bottom, rect.top + 17);
+    }
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, color);
-    SelectObject(dc, gNoteFont);
-    DrawTextW(dc, text.c_str(), -1, const_cast<RECT*>(&rect), DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    HGDIOBJ oldFont = SelectObject(dc, gKeyFont ? gKeyFont : gNoteFont);
+    DrawTextW(dc, text.c_str(), -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(dc, oldFont);
 }
 
 void PaintOverlay(HWND hwnd) {
@@ -533,19 +1009,48 @@ void PaintOverlay(HWND hwnd) {
     HBITMAP bitmap = CreateCompatibleBitmap(dc, width, height);
     HGDIOBJ oldBitmap = SelectObject(mem, bitmap);
 
-    HBRUSH bg = CreateSolidBrush(gConfig.debugBackground ? RGB(28, 28, 28) : kTransparentKey);
+    VisualTheme theme = CurrentTheme();
+    COLORREF canvasColor = gConfig.debugBackground ? theme.background : kTransparentKey;
+    HBRUSH bg = CreateSolidBrush(canvasColor);
     FillRect(mem, &client, bg);
     DeleteObject(bg);
 
     int laneCount = static_cast<int>(gConfig.lanes.size());
     int margin = std::max(24, width / 24);
     int laneArea = std::max(1, width - margin * 2);
+    int laneSlotW = laneCount > 0 ? std::max(1, laneArea / laneCount) : laneArea;
+    auto laneCenterX = [&](int lane) {
+        if (laneCount <= 1) {
+            return width / 2;
+        }
+        double baseSpan = std::max(1, laneArea - laneSlotW);
+        double span = baseSpan * static_cast<double>(ClampInt(gConfig.laneSpacingPercent, 50, 160)) / 100.0;
+        double first = margin + laneArea / 2.0 - span / 2.0;
+        return static_cast<int>(std::round(first + span * static_cast<double>(lane) / static_cast<double>(laneCount - 1)));
+    };
+
+    if (gConfig.laneBackground && laneCount > 0) {
+        COLORREF laneFill = BlendColor(theme.laneFill, canvasColor, theme.laneAlpha);
+        HBRUSH laneBrush = CreateSolidBrush(laneFill);
+        HPEN lanePen = CreatePen(PS_SOLID, 1, BlendColor(theme.laneLine, canvasColor, 72));
+        HGDIOBJ oldBrush = SelectObject(mem, laneBrush);
+        HGDIOBJ oldPen = SelectObject(mem, lanePen);
+        for (int i = 0; i < laneCount; ++i) {
+            int x = laneCenterX(i);
+            int laneW = std::max(24, std::min(96, laneSlotW - 8));
+            RoundRect(mem, x - laneW / 2, 5, x + laneW / 2, height - 5, 8, 8);
+        }
+        SelectObject(mem, oldPen);
+        SelectObject(mem, oldBrush);
+        DeleteObject(lanePen);
+        DeleteObject(laneBrush);
+    }
 
     if (gConfig.debugBackground && laneCount > 0) {
-        HPEN gridPen = CreatePen(PS_SOLID, 1, RGB(58, 58, 58));
+        HPEN gridPen = CreatePen(PS_SOLID, 1, BlendColor(theme.laneLine, canvasColor, 118));
         HGDIOBJ oldPen = SelectObject(mem, gridPen);
         for (int i = 0; i < laneCount; ++i) {
-            int x = margin + static_cast<int>(std::round(laneArea * ((i + 0.5) / laneCount)));
+            int x = laneCenterX(i);
             MoveToEx(mem, x, 0, nullptr);
             LineTo(mem, x, height);
         }
@@ -567,9 +1072,14 @@ void PaintOverlay(HWND hwnd) {
         double headTravel = std::min(static_cast<double>(gConfig.travelPx), speed * pressAge);
         double tailTravel = note.held ? 0.0 : std::min(static_cast<double>(gConfig.travelPx), speed * releaseAge);
         double fadeT = note.held ? 0.0 : std::max(0.0, std::min(1.0, releaseAge / gConfig.durationMs));
-        int laneX = margin + static_cast<int>(std::round(laneArea * ((note.lane + 0.5) / laneCount)));
-        int noteW = std::min(std::max(gConfig.noteWidth, laneArea / std::max(1, laneCount) - 8), 120);
-        int noteH = gConfig.noteHeight;
+        int laneX = laneCenterX(note.lane);
+        int noteW = ClampInt(gConfig.noteWidth, 24, 220);
+        int noteH = ClampInt(gConfig.noteHeight, 18, 140);
+        if (gConfig.circleNotes) {
+            int diameter = std::min(noteW, std::max(noteH, 42));
+            noteW = diameter;
+            noteH = diameter;
+        }
         int baseCenterY = height - noteH / 2 - 8;
         int centerY = baseCenterY - static_cast<int>(std::round(headTravel));
         int alphaFade = note.held || fadeT < 0.68 ? 255 : static_cast<int>(std::round(255.0 * (1.0 - fadeT) / 0.32));
@@ -577,10 +1087,7 @@ void PaintOverlay(HWND hwnd) {
 
         COLORREF bodyColor = note.color;
         if (alphaFade < 255) {
-            int r = GetRValue(bodyColor) * alphaFade / 255 + GetRValue(kTransparentKey) * (255 - alphaFade) / 255;
-            int g = GetGValue(bodyColor) * alphaFade / 255 + GetGValue(kTransparentKey) * (255 - alphaFade) / 255;
-            int b = GetBValue(bodyColor) * alphaFade / 255 + GetBValue(kTransparentKey) * (255 - alphaFade) / 255;
-            bodyColor = RGB(r, g, b);
+            bodyColor = BlendColor(bodyColor, canvasColor, alphaFade);
         }
 
         bool drawHoldBody = note.held || holdMs >= kHoldThresholdMs;
@@ -592,34 +1099,84 @@ void PaintOverlay(HWND hwnd) {
             if (tailBottom > tailTop + 4) {
                 int tailW = std::max(12, noteW / 2);
                 RECT tailShadow{laneX - tailW / 2 + 3, tailTop + 3, laneX + tailW / 2 + 3, tailBottom + 3};
-                HBRUSH tailShadowBrush = CreateSolidBrush(RGB(10, 12, 16));
+                HBRUSH tailShadowBrush = CreateSolidBrush(theme.shadow);
                 FillRect(mem, &tailShadow, tailShadowBrush);
                 DeleteObject(tailShadowBrush);
 
                 RECT tail{laneX - tailW / 2, tailTop, laneX + tailW / 2, tailBottom};
-                HBRUSH tailBrush = CreateSolidBrush(bodyColor);
-                HPEN tailPen = CreatePen(PS_SOLID, 2, RGB(248, 250, 252));
+                int tailAlpha = ClampInt(gConfig.longNoteAlpha * alphaFade / 255, 24, 180);
+                COLORREF tailColor = BlendColor(note.color, canvasColor, tailAlpha);
+                HBRUSH tailBrush = CreateSolidBrush(tailColor);
+                HPEN tailPen = CreatePen(PS_SOLID, gConfig.thinOutline ? 1 : 2, BlendColor(theme.outline, canvasColor, 115));
                 HGDIOBJ oldBrush = SelectObject(mem, tailBrush);
                 HGDIOBJ oldPen = SelectObject(mem, tailPen);
-                RoundRect(mem, tail.left, tail.top, tail.right, tail.bottom, 5, 5);
+                RoundRect(mem, tail.left, tail.top, tail.right, tail.bottom, 6, 6);
                 SelectObject(mem, oldPen);
                 SelectObject(mem, oldBrush);
                 DeleteObject(tailPen);
                 DeleteObject(tailBrush);
+
+                int capH = std::max(10, noteH / 3);
+                RECT tailCap{laneX - noteW / 2, tailBottom - capH / 2, laneX + noteW / 2, tailBottom + capH / 2};
+                COLORREF capColor = BlendColor(note.color, canvasColor, ClampInt(tailAlpha + 46, 48, 210));
+                HBRUSH capBrush = CreateSolidBrush(capColor);
+                HPEN capPen = CreatePen(PS_SOLID, gConfig.thinOutline ? 1 : 2, BlendColor(theme.outline, canvasColor, 150));
+                oldBrush = SelectObject(mem, capBrush);
+                oldPen = SelectObject(mem, capPen);
+                RoundRect(mem, tailCap.left, tailCap.top, tailCap.right, tailCap.bottom, 10, 10);
+                SelectObject(mem, oldPen);
+                SelectObject(mem, oldBrush);
+                DeleteObject(capPen);
+                DeleteObject(capBrush);
+            }
+        }
+
+        double pulseT = 1.0 - std::max(0.0, std::min(1.0, pressAge / kPulseMs));
+        if (pulseT > 0.0) {
+            for (int ring = 0; ring < 3; ++ring) {
+                int grow = 3 + ring * 5 + static_cast<int>(std::round(10.0 * pulseT));
+                RECT pulse{laneX - noteW / 2 - grow, centerY - noteH / 2 - grow, laneX + noteW / 2 + grow, centerY + noteH / 2 + grow};
+                int alpha = static_cast<int>(std::round((theme.pulseAlpha - ring * 28) * pulseT));
+                COLORREF pulseColor = BlendColor(note.color, canvasColor, alpha);
+                HPEN pulsePen = CreatePen(PS_SOLID, 1, pulseColor);
+                HGDIOBJ oldPen = SelectObject(mem, pulsePen);
+                HGDIOBJ oldBrush = SelectObject(mem, GetStockObject(NULL_BRUSH));
+                if (gConfig.circleNotes) {
+                    Ellipse(mem, pulse.left, pulse.top, pulse.right, pulse.bottom);
+                } else {
+                    RoundRect(mem, pulse.left, pulse.top, pulse.right, pulse.bottom, gConfig.roundedBoxes ? 16 : 3, gConfig.roundedBoxes ? 16 : 3);
+                }
+                SelectObject(mem, oldBrush);
+                SelectObject(mem, oldPen);
+                DeleteObject(pulsePen);
             }
         }
 
         RECT shadow{laneX - noteW / 2 + 3, centerY - noteH / 2 + 3, laneX + noteW / 2 + 3, centerY + noteH / 2 + 3};
-        HBRUSH shadowBrush = CreateSolidBrush(RGB(10, 12, 16));
-        FillRect(mem, &shadow, shadowBrush);
+        HBRUSH shadowBrush = CreateSolidBrush(theme.shadow);
+        if (gConfig.circleNotes) {
+            HGDIOBJ oldShadowBrush = SelectObject(mem, shadowBrush);
+            HGDIOBJ oldShadowPen = SelectObject(mem, GetStockObject(NULL_PEN));
+            Ellipse(mem, shadow.left, shadow.top, shadow.right, shadow.bottom);
+            SelectObject(mem, oldShadowPen);
+            SelectObject(mem, oldShadowBrush);
+        } else {
+            FillRect(mem, &shadow, shadowBrush);
+        }
         DeleteObject(shadowBrush);
 
         RECT body{laneX - noteW / 2, centerY - noteH / 2, laneX + noteW / 2, centerY + noteH / 2};
         HBRUSH brush = CreateSolidBrush(bodyColor);
-        HPEN pen = CreatePen(PS_SOLID, 2, RGB(248, 250, 252));
+        HPEN pen = CreatePen(PS_SOLID, gConfig.thinOutline ? 1 : 2, theme.outline);
         HGDIOBJ oldBrush = SelectObject(mem, brush);
         HGDIOBJ oldPen = SelectObject(mem, pen);
-        RoundRect(mem, body.left, body.top, body.right, body.bottom, 6, 6);
+        if (gConfig.circleNotes) {
+            Ellipse(mem, body.left, body.top, body.right, body.bottom);
+        } else if (gConfig.roundedBoxes) {
+            RoundRect(mem, body.left, body.top, body.right, body.bottom, 12, 12);
+        } else {
+            Rectangle(mem, body.left, body.top, body.right, body.bottom);
+        }
         SelectObject(mem, oldPen);
         SelectObject(mem, oldBrush);
         DeleteObject(pen);
@@ -627,12 +1184,17 @@ void PaintOverlay(HWND hwnd) {
 
         HPEN shinePen = CreatePen(PS_SOLID, 1, RGB(255, 255, 255));
         oldPen = SelectObject(mem, shinePen);
-        MoveToEx(mem, body.left + 7, body.top + 6, nullptr);
-        LineTo(mem, body.right - 7, body.top + 6);
+        if (gConfig.circleNotes) {
+            MoveToEx(mem, body.left + noteW / 3, body.top + noteH / 4, nullptr);
+            LineTo(mem, body.right - noteW / 3, body.top + noteH / 4);
+        } else {
+            MoveToEx(mem, body.left + 7, body.top + 6, nullptr);
+            LineTo(mem, body.right - 7, body.top + 6);
+        }
         SelectObject(mem, oldPen);
         DeleteObject(shinePen);
 
-        DrawCenteredText(mem, body, note.label, RGB(8, 17, 31));
+        DrawKeyLabel(mem, body, note.label, theme.text);
     }
 
     BitBlt(dc, 0, 0, width, height, mem, 0, 0, SRCCOPY);
@@ -706,9 +1268,18 @@ void FillSettingsControls(HWND hwnd) {
     SetEditInt(hwnd, IDC_HEIGHT, gConfig.height);
     SetEditInt(hwnd, IDC_DURATION, gConfig.durationMs);
     SetEditInt(hwnd, IDC_TRAVEL, gConfig.travelPx);
+    SetEditInt(hwnd, IDC_NOTE_WIDTH, gConfig.noteWidth);
+    SetEditInt(hwnd, IDC_NOTE_HEIGHT, gConfig.noteHeight);
+    SetEditInt(hwnd, IDC_LANE_SPACING, gConfig.laneSpacingPercent);
+    SetEditInt(hwnd, IDC_OPACITY, gConfig.opacityPercent);
     SendMessageW(GetDlgItem(hwnd, IDC_DEBUG_BG), BM_SETCHECK, gConfig.debugBackground ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(GetDlgItem(hwnd, IDC_CLICK_THROUGH), BM_SETCHECK, gConfig.clickThrough ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(GetDlgItem(hwnd, IDC_TOPMOST), BM_SETCHECK, gConfig.alwaysOnTop ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(GetDlgItem(hwnd, IDC_CIRCLE_NOTES), BM_SETCHECK, gConfig.circleNotes ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(GetDlgItem(hwnd, IDC_LANE_BG), BM_SETCHECK, gConfig.laneBackground ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(GetDlgItem(hwnd, IDC_ROUNDED_BOXES), BM_SETCHECK, gConfig.roundedBoxes ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(GetDlgItem(hwnd, IDC_THIN_OUTLINE), BM_SETCHECK, gConfig.thinOutline ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(GetDlgItem(hwnd, IDC_KEY_TEXT_BOTTOM), BM_SETCHECK, gConfig.keyTextBottom ? BST_CHECKED : BST_UNCHECKED, 0);
     RefreshKeyMapStatus();
 }
 
@@ -738,15 +1309,23 @@ bool ReadSettingsControls() {
     gConfig.height = WindowInt(GetDlgItem(gSettingsWnd, IDC_HEIGHT), gConfig.height, 90, 4000);
     gConfig.durationMs = WindowInt(GetDlgItem(gSettingsWnd, IDC_DURATION), gConfig.durationMs, 120, 5000);
     gConfig.travelPx = WindowInt(GetDlgItem(gSettingsWnd, IDC_TRAVEL), gConfig.travelPx, 40, 4000);
+    gConfig.noteWidth = WindowInt(GetDlgItem(gSettingsWnd, IDC_NOTE_WIDTH), gConfig.noteWidth, 24, 220);
+    gConfig.noteHeight = WindowInt(GetDlgItem(gSettingsWnd, IDC_NOTE_HEIGHT), gConfig.noteHeight, 18, 140);
+    gConfig.laneSpacingPercent = WindowInt(GetDlgItem(gSettingsWnd, IDC_LANE_SPACING), gConfig.laneSpacingPercent, 50, 160);
+    gConfig.opacityPercent = WindowInt(GetDlgItem(gSettingsWnd, IDC_OPACITY), gConfig.opacityPercent, 20, 100);
     gConfig.debugBackground = SendMessageW(GetDlgItem(gSettingsWnd, IDC_DEBUG_BG), BM_GETCHECK, 0, 0) == BST_CHECKED;
     gConfig.clickThrough = SendMessageW(GetDlgItem(gSettingsWnd, IDC_CLICK_THROUGH), BM_GETCHECK, 0, 0) == BST_CHECKED;
     gConfig.alwaysOnTop = SendMessageW(GetDlgItem(gSettingsWnd, IDC_TOPMOST), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    gConfig.circleNotes = SendMessageW(GetDlgItem(gSettingsWnd, IDC_CIRCLE_NOTES), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    gConfig.laneBackground = SendMessageW(GetDlgItem(gSettingsWnd, IDC_LANE_BG), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    gConfig.roundedBoxes = SendMessageW(GetDlgItem(gSettingsWnd, IDC_ROUNDED_BOXES), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    gConfig.thinOutline = SendMessageW(GetDlgItem(gSettingsWnd, IDC_THIN_OUTLINE), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    gConfig.keyTextBottom = SendMessageW(GetDlgItem(gSettingsWnd, IDC_KEY_TEXT_BOTTOM), BM_GETCHECK, 0, 0) == BST_CHECKED;
     RebuildLaneConfig();
     gConfig.lanesText = CanonicalLaneText();
     SetWindowTextW(GetDlgItem(gSettingsWnd, IDC_LANES), gConfig.lanesText.c_str());
     gConfig.mode = DetectModeForLanes(gConfig.lanesText);
-    gNotes.clear();
-    gKeyDown.fill(false);
+    ResetInputRuntimeState();
     RefreshKeyMapStatus();
     ApplyOverlayWindowStyle();
     return !gConfig.lanes.empty();
@@ -759,9 +1338,15 @@ void ApplyPreset(const wchar_t* mode, const wchar_t* lanes) {
     RebuildLaneConfig();
     gConfig.lanesText = CanonicalLaneText();
     SetWindowTextW(GetDlgItem(gSettingsWnd, IDC_LANES), gConfig.lanesText.c_str());
-    gNotes.clear();
-    gKeyDown.fill(false);
+    ResetInputRuntimeState();
     RefreshKeyMapStatus();
+    InvalidateRect(gOverlayWnd, nullptr, FALSE);
+}
+
+void ApplyVisualPresetButton(const wchar_t* preset) {
+    ApplyVisualPreset(preset);
+    FillSettingsControls(gSettingsWnd);
+    ApplyOverlayWindowStyle();
     InvalidateRect(gOverlayWnd, nullptr, FALSE);
 }
 
@@ -796,15 +1381,35 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         MakeLabel(hwnd, L"Travel px", 330, 164, 70, 22);
         MakeEdit(hwnd, IDC_TRAVEL, L"", 402, 162, 70, 24);
 
-        MakeButton(hwnd, IDC_DEBUG_BG, L"Debug background", 130, 202, 150, 24, BS_AUTOCHECKBOX);
-        MakeButton(hwnd, IDC_CLICK_THROUGH, L"Click-through", 290, 202, 120, 24, BS_AUTOCHECKBOX);
-        MakeButton(hwnd, IDC_TOPMOST, L"Always on top", 130, 232, 150, 24, BS_AUTOCHECKBOX);
+        MakeLabel(hwnd, L"Geometry", 18, 202, 110, 22);
+        MakeLabel(hwnd, L"Note W", 130, 202, 58, 22);
+        MakeEdit(hwnd, IDC_NOTE_WIDTH, L"", 190, 200, 46, 24);
+        MakeLabel(hwnd, L"Note H", 248, 202, 58, 22);
+        MakeEdit(hwnd, IDC_NOTE_HEIGHT, L"", 308, 200, 46, 24);
+        MakeLabel(hwnd, L"Lane %", 366, 202, 54, 22);
+        MakeEdit(hwnd, IDC_LANE_SPACING, L"", 424, 200, 46, 24);
 
-        MakeButton(hwnd, IDC_APPLY, L"Apply", 130, 278, 78, 30);
-        MakeButton(hwnd, IDC_SAVE, L"Save", 220, 278, 78, 30);
-        MakeButton(hwnd, IDC_TEST, L"Test notes", 310, 278, 100, 30);
+        MakeLabel(hwnd, L"Visual", 18, 238, 110, 22);
+        MakeButton(hwnd, IDC_VIS_CLASSIC, L"Classic", 130, 234, 72, 28);
+        MakeButton(hwnd, IDC_VIS_NEON, L"Neon", 212, 234, 72, 28);
+        MakeButton(hwnd, IDC_VIS_MINIMAL, L"Minimal", 294, 234, 72, 28);
+        MakeLabel(hwnd, L"Opacity %", 378, 238, 70, 22);
+        MakeEdit(hwnd, IDC_OPACITY, L"", 450, 236, 40, 24);
+
+        MakeButton(hwnd, IDC_DEBUG_BG, L"Debug background", 130, 274, 150, 24, BS_AUTOCHECKBOX);
+        MakeButton(hwnd, IDC_LANE_BG, L"Lane background", 290, 274, 150, 24, BS_AUTOCHECKBOX);
+        MakeButton(hwnd, IDC_ROUNDED_BOXES, L"Rounded boxes", 130, 304, 150, 24, BS_AUTOCHECKBOX);
+        MakeButton(hwnd, IDC_THIN_OUTLINE, L"Thin outline", 290, 304, 120, 24, BS_AUTOCHECKBOX);
+        MakeButton(hwnd, IDC_CIRCLE_NOTES, L"Circle notes", 130, 334, 120, 24, BS_AUTOCHECKBOX);
+        MakeButton(hwnd, IDC_KEY_TEXT_BOTTOM, L"Key labels bottom", 260, 334, 150, 24, BS_AUTOCHECKBOX);
+        MakeButton(hwnd, IDC_CLICK_THROUGH, L"Click-through", 130, 364, 120, 24, BS_AUTOCHECKBOX);
+        MakeButton(hwnd, IDC_TOPMOST, L"Always on top", 260, 364, 150, 24, BS_AUTOCHECKBOX);
+
+        MakeButton(hwnd, IDC_APPLY, L"Apply", 130, 410, 78, 30);
+        MakeButton(hwnd, IDC_SAVE, L"Save", 220, 410, 78, 30);
+        MakeButton(hwnd, IDC_TEST, L"Test notes", 310, 410, 100, 30);
         {
-            HWND status = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, 18, 326, 472, 22,
+            HWND status = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, 18, 458, 472, 22,
                                         hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), gInstance, nullptr);
             SendMessageW(status, WM_SETFONT, reinterpret_cast<WPARAM>(gGuiFont), TRUE);
         }
@@ -823,6 +1428,18 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             return 0;
         case IDC_PRESET_10:
             ApplyPreset(kPresets[2].mode, kPresets[2].lanes);
+            SpawnTestNotes();
+            return 0;
+        case IDC_VIS_CLASSIC:
+            ApplyVisualPresetButton(L"Classic");
+            SpawnTestNotes();
+            return 0;
+        case IDC_VIS_NEON:
+            ApplyVisualPresetButton(L"Neon");
+            SpawnTestNotes();
+            return 0;
+        case IDC_VIS_MINIMAL:
+            ApplyVisualPresetButton(L"Minimal");
             SpawnTestNotes();
             return 0;
         case IDC_APPLY:
@@ -884,6 +1501,7 @@ LRESULT CALLBACK KeyboardProc(int code, WPARAM wParam, LPARAM lParam) {
             gKeyDown[vk] = false;
             int lane = gVkToLaneIndex[vk];
             if (lane >= 0) {
+                gPendingLaneUpMs[static_cast<size_t>(lane)] = NowMs();
                 PostMessageW(gOverlayWnd, WM_APP_KEY_UP, static_cast<WPARAM>(lane), 0);
             }
         } else if (vk < gKeyDown.size() && keyDown) {
@@ -893,6 +1511,7 @@ LRESULT CALLBACK KeyboardProc(int code, WPARAM wParam, LPARAM lParam) {
                 gKeyDown[vk] = true;
                 int lane = gVkToLaneIndex[vk];
                 if (lane >= 0) {
+                    gPendingLaneDownMs[static_cast<size_t>(lane)] = NowMs();
                     PostMessageW(gOverlayWnd, WM_APP_KEY_DOWN, static_cast<WPARAM>(lane), 0);
                 }
             }
@@ -937,7 +1556,7 @@ bool CreateAppWindows(int showCommand) {
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         530,
-        400,
+        540,
         nullptr,
         nullptr,
         gInstance,
@@ -985,9 +1604,60 @@ int RunSelfTest() {
     hold.held = false;
     bool holdLifecycleOk = hold.releaseMs - hold.pressMs >= kHoldThresholdMs;
 
-    gConfigPath = CurrentDirectory() + L"key_note_cpp_selftest.ini";
+    gChordAnchorMs = -1000000.0;
+    double chordA = AlignChordPressMs(1000.0);
+    double chordB = AlignChordPressMs(1015.0);
+    double chordC = AlignChordPressMs(1015.1);
+    bool chordAlignOk = std::abs(chordA - 1000.0) < 0.001 && std::abs(chordB - 1000.0) < 0.001 && std::abs(chordC - 1015.1) < 0.001;
+
+    ApplyVisualPreset(L"Neon");
+    bool visualPresetOk = gConfig.visualPreset == L"Neon" && gConfig.circleNotes && gConfig.laneBackground && gConfig.roundedBoxes && gConfig.thinOutline;
+    gConfig.opacityPercent = 73;
+    gConfig.laneSpacingPercent = 123;
+    gConfig.noteWidth = 77;
+    gConfig.noteHeight = 41;
+    gConfig.longNoteAlpha = 64;
+    gConfig.keyTextBottom = false;
+    gJsonConfigPath = CurrentDirectory() + L"key_note_cpp_selftest.json";
+    gIniConfigPath = CurrentDirectory() + L"key_note_cpp_selftest.ini";
+    gConfigPath = gJsonConfigPath;
     bool saveOk = SaveConfig();
     bool saveReadbackOk = ReadIniString(L"input", L"lanes", L"") == gConfig.lanesText;
+    bool circleReadbackOk = ReadIniBool(L"overlay", L"circle_notes", false);
+    bool visualReadbackOk = ReadIniString(L"overlay", L"visual_preset", L"") == L"Neon" &&
+                            ReadIniInt(L"overlay", L"opacity_percent", 0) == 73 &&
+                            ReadIniInt(L"overlay", L"lane_spacing_percent", 0) == 123 &&
+                            ReadIniInt(L"overlay", L"note_width", 0) == 77 &&
+                            ReadIniInt(L"overlay", L"note_height", 0) == 41 &&
+                            ReadIniInt(L"overlay", L"long_note_alpha", 0) == 64 &&
+                            ReadIniBool(L"overlay", L"lane_background", false) &&
+                            ReadIniBool(L"overlay", L"rounded_boxes", false) &&
+                            ReadIniBool(L"overlay", L"thin_outline", false) &&
+                            !ReadIniBool(L"overlay", L"key_text_bottom", true);
+    std::string jsonText;
+    std::string jsonPreset;
+    int jsonInt = 0;
+    std::vector<std::string> jsonLanes;
+    bool jsonReadbackOk = ReadTextFile(gJsonConfigPath, jsonText) &&
+                          JsonReadString(jsonText, "visual_preset", jsonPreset) && jsonPreset == "Neon" &&
+                          JsonReadInt(jsonText, "opacity_percent", jsonInt) && jsonInt == 73 &&
+                          JsonReadInt(jsonText, "lane_spacing_percent", jsonInt) && jsonInt == 123 &&
+                          JsonReadInt(jsonText, "note_width", jsonInt) && jsonInt == 77 &&
+                          JsonReadInt(jsonText, "note_height", jsonInt) && jsonInt == 41 &&
+                          JsonReadStringArray(jsonText, "lanes", jsonLanes) && jsonLanes.size() == 5 && jsonLanes[2] == "SEMICOLON";
+    Config savedConfig = gConfig;
+    gConfig = Config{};
+    bool jsonLoadOk = LoadJsonConfig();
+    ClampAndRebuildConfig();
+    jsonLoadOk = jsonLoadOk &&
+                 gConfig.visualPreset == L"Neon" &&
+                 gConfig.opacityPercent == 73 &&
+                 gConfig.laneSpacingPercent == 123 &&
+                 gConfig.noteWidth == 77 &&
+                 gConfig.noteHeight == 41 &&
+                 gConfig.lanesText == L"Q,W,SEMICOLON,LBRACKET,COMMA";
+    gConfig = savedConfig;
+    RebuildLaneConfig();
 
     std::ofstream log("key_note_cpp_selftest.log", std::ios::out | std::ios::trunc);
     log << "lane_count_8k=" << (laneCountOk ? 8 : 0) << "\n";
@@ -1000,7 +1670,13 @@ int RunSelfTest() {
     log << "save_ok=" << (saveOk ? 1 : 0) << "\n";
     log << "save_readback_ok=" << (saveReadbackOk ? 1 : 0) << "\n";
     log << "hold_lifecycle_ok=" << (holdLifecycleOk ? 1 : 0) << "\n";
-    bool ok = semicolonOk && laneCountOk && registeredOk && unregisteredFiltered && fiveKeyOk && tenKeyOk && canonicalOk && saveOk && saveReadbackOk && holdLifecycleOk;
+    log << "circle_readback_ok=" << (circleReadbackOk ? 1 : 0) << "\n";
+    log << "visual_preset_ok=" << (visualPresetOk ? 1 : 0) << "\n";
+    log << "visual_readback_ok=" << (visualReadbackOk ? 1 : 0) << "\n";
+    log << "json_readback_ok=" << (jsonReadbackOk ? 1 : 0) << "\n";
+    log << "json_load_ok=" << (jsonLoadOk ? 1 : 0) << "\n";
+    log << "chord_align_ok=" << (chordAlignOk ? 1 : 0) << "\n";
+    bool ok = semicolonOk && laneCountOk && registeredOk && unregisteredFiltered && fiveKeyOk && tenKeyOk && canonicalOk && saveOk && saveReadbackOk && holdLifecycleOk && circleReadbackOk && visualPresetOk && visualReadbackOk && jsonReadbackOk && jsonLoadOk && chordAlignOk;
     log << "result=" << (ok ? "ok" : "fail") << "\n";
 
     return ok ? 0 : 1;
@@ -1020,6 +1696,22 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int showCommand) {
     gGuiFont = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
     gNoteFont = CreateFontW(
         18,
+        0,
+        0,
+        0,
+        FW_BOLD,
+        FALSE,
+        FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE,
+        L"Segoe UI"
+    );
+    gKeyFont = CreateFontW(
+        12,
         0,
         0,
         0,
@@ -1060,6 +1752,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int showCommand) {
     if (gNoteFont) {
         DeleteObject(gNoteFont);
         gNoteFont = nullptr;
+    }
+    if (gKeyFont) {
+        DeleteObject(gKeyFont);
+        gKeyFont = nullptr;
     }
     return static_cast<int>(msg.wParam);
 }

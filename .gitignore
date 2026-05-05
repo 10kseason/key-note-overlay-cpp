@@ -5,7 +5,9 @@ dist/
 
 # Local runtime state
 key_note_cpp_config.ini
+key_note_cpp_config.json
 key_note_cpp_selftest.ini
+key_note_cpp_selftest.json
 key_note_cpp_selftest.log
 key_note_overlay_config.json
 key_note_overlay_debug.log
