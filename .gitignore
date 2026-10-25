@@ -1,6 +1,7 @@
 # Build outputs
 build-cpp/
 build-cpp-ninja/
+build-cpp-settings/
 dist/
 
 # Local runtime state
@@ -12,6 +13,9 @@ key_note_cpp_selftest.log
 key_note_overlay_config.json
 key_note_overlay_debug.log
 *.log
+
+# Opt-in session reports contain local play timing. Never publish them by accident.
+reports/
 
 # Python prototype/cache files are kept local unless explicitly published.
 key_note_overlay.py

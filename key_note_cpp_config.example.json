@@ -19,10 +19,22 @@
     "lane_background": true,
     "rounded_boxes": true,
     "thin_outline": true,
-    "key_text_bottom": true
+    "key_text_bottom": true,
+    "difficulty_enabled": true,
+    "difficulty_hud": true,
+    "report_auto_save": false,
+    "game_overlay": false
   },
   "input": {
     "mode": "8K",
-    "lanes": ["A", "S", "D", "F", "J", "K", "L", "SEMICOLON"]
-  }
+    "lanes": ["A", "S", "D", "F", "J", "K", "L", "SEMICOLON"],
+    "preset_4k": "",
+    "preset_5k": "",
+    "preset_6k": "",
+    "preset_7k": "",
+    "preset_8k": "",
+    "preset_9k": "",
+    "preset_10k": ""
+  },
+  "key_styles": {}
 }

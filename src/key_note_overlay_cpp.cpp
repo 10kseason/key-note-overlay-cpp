@@ -13,14 +13,29 @@
 
 #include <windows.h>
 #include <commctrl.h>
+#include <shellapi.h>
+#include <commdlg.h>
+#include "alpha_surface.h"
+#include "pattern_difficulty.h"
+#include "dan_rating.h"
+#include "session_report.h"
+#include "game_overlay.h"
+#include "self_test_io.h"
+#include "window_placement.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cerrno>
+#include <cwchar>
 #include <cwctype>
+#include <cstdio>
 #include <fstream>
+#include <future>
+#include <iomanip>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -28,7 +43,14 @@ namespace {
 
 constexpr UINT WM_APP_KEY_DOWN = WM_APP + 1;
 constexpr UINT WM_APP_KEY_UP = WM_APP + 2;
+constexpr UINT WM_APP_TRAY = WM_APP + 3;
 constexpr UINT_PTR TIMER_RENDER = 1;
+constexpr UINT_PTR TIMER_DIFFICULTY = 2;
+constexpr UINT_PTR TIMER_TRAY_RETRY = 3;
+constexpr UINT ID_TRAY_SETTINGS = 40001;
+constexpr UINT ID_TRAY_EXIT = 40002;
+constexpr UINT ID_TRAY_MOVE = 40003;
+constexpr UINT TRAY_ICON_ID = 1;
 constexpr COLORREF kTransparentKey = RGB(1, 2, 3);
 
 constexpr int IDC_LANES = 1001;
@@ -45,9 +67,6 @@ constexpr int IDC_APPLY = 1011;
 constexpr int IDC_SAVE = 1012;
 constexpr int IDC_TEST = 1013;
 constexpr int IDC_STATUS = 1014;
-constexpr int IDC_PRESET_5 = 1015;
-constexpr int IDC_PRESET_8 = 1016;
-constexpr int IDC_PRESET_10 = 1017;
 constexpr int IDC_CIRCLE_NOTES = 1018;
 constexpr int IDC_VIS_CLASSIC = 1019;
 constexpr int IDC_VIS_NEON = 1020;
@@ -60,6 +79,44 @@ constexpr int IDC_KEY_TEXT_BOTTOM = 1026;
 constexpr int IDC_LANE_SPACING = 1027;
 constexpr int IDC_NOTE_WIDTH = 1028;
 constexpr int IDC_NOTE_HEIGHT = 1029;
+constexpr int IDC_TABS = 1030;
+constexpr int IDC_PRESET = 1031;
+constexpr int IDC_LANE_LIST = 1032;
+constexpr int IDC_RECORD = 1033;
+constexpr int IDC_REPLACE = 1034;
+constexpr int IDC_MOVE_LEFT = 1035;
+constexpr int IDC_MOVE_RIGHT = 1036;
+constexpr int IDC_REMOVE = 1037;
+constexpr int IDC_REVERT = 1038;
+constexpr int IDC_CENTER = 1039;
+constexpr int IDC_DIRTY = 1040;
+constexpr int IDC_LANE_SUMMARY = 1041;
+constexpr int IDC_LONG_ALPHA = 1042;
+constexpr int IDC_VISUAL_NAME = 1043;
+constexpr int IDC_DIFFICULTY_ENABLED = 1044;
+constexpr int IDC_DIFFICULTY_HUD = 1045;
+constexpr int IDC_DIFFICULTY_SCORE = 1046;
+constexpr int IDC_DIFFICULTY_METRICS = 1047;
+constexpr int IDC_DIFFICULTY_BAR = 1048;
+constexpr int IDC_DIFFICULTY_RESET = 1049;
+constexpr int IDC_DIFFICULTY_NPS = 1050;
+constexpr int IDC_DIFFICULTY_PREVIOUS = 1051;
+constexpr int IDC_DIFFICULTY_PROFILE = 1052;
+constexpr int IDC_MOVE_MODE = 1053;
+constexpr int IDC_SAVE_POSITION = 1054;
+constexpr int IDC_STYLE_KEYS = 1055;
+constexpr int IDC_KEY_COLOR = 1056;
+constexpr int IDC_KEY_OPACITY = 1057;
+constexpr int IDC_PICK_COLOR = 1058;
+constexpr int IDC_RESET_KEY_STYLE = 1059;
+constexpr int IDC_STYLE_PREVIEW = 1060;
+constexpr int IDC_STYLE_NAME = 1061;
+constexpr int IDC_REPORT_AUTO = 1062;
+constexpr int IDC_REPORT_OPEN = 1063;
+constexpr int IDC_REPORT_RETRY = 1064;
+constexpr int IDC_REPORT_STATUS = 1065;
+constexpr int IDC_GAME_OVERLAY = 1066;
+constexpr int IDC_GAME_STATUS = 1067;
 
 constexpr double kHoldThresholdMs = 90.0;
 constexpr double kChordAlignWindowMs = 15.0;
@@ -72,6 +129,12 @@ struct Lane {
     UINT vk = 0;
     std::wstring token;
     std::wstring label;
+};
+
+struct KeyStyle {
+    COLORREF color = CLR_INVALID; // Default palette follows lane order until customized.
+    int opacity = 100;
+    bool operator==(const KeyStyle& other) const { return color == other.color && opacity == other.opacity; }
 };
 
 struct Config {
@@ -96,7 +159,13 @@ struct Config {
     bool roundedBoxes = true;
     bool thinOutline = true;
     bool keyTextBottom = true;
+    bool difficultyEnabled = true;
+    bool difficultyHud = true;
+    bool reportAutoSave = false; // Local input timing persistence is explicitly opt-in.
+    bool gameOverlay = false;
     std::wstring lanesText = L"A,S,D,F,J,K,L,SEMICOLON";
+    std::array<std::wstring, 7> presetLanes{}; // empty entry uses the built-in layout
+    std::array<KeyStyle, 256> keyStyles{}; // Physical key identity survives reorder/preset changes.
     std::vector<Lane> lanes;
 };
 
@@ -108,6 +177,7 @@ struct Note {
     double releaseMs = -1.0;
     bool held = true;
     COLORREF color = RGB(88, 213, 255);
+    int opacity = 100;
 };
 
 struct Preset {
@@ -132,7 +202,58 @@ HWND gOverlayWnd = nullptr;
 HFONT gGuiFont = nullptr;
 HFONT gNoteFont = nullptr;
 HFONT gKeyFont = nullptr;
+HFONT gHudValueFont = nullptr;
+HFONT gHudSmallFont = nullptr;
+HFONT gHudLabelFont = nullptr;
 Config gConfig;
+Config gSavedConfig;
+bool gFillingControls = false;
+bool gUnapplied = false;
+bool gUnsaved = false;
+bool gUiSelfTest = false;
+bool gMoveMode = false; // Temporary: never changes the saved click-through preference.
+bool gOverlayMoving = false;
+RECT gMoveStart{};
+bool gAppRunning = false;
+bool gShuttingDown = false;
+bool gCloseInProgress = false;
+bool gPickingColor = false;
+bool gTrayAdded = false;
+bool gTrayVersion4 = false;
+UINT gTaskbarCreatedMessage = 0;
+NOTIFYICONDATAW gTrayIcon{};
+// Native API boundaries also let lifecycle tests run without altering the tray
+// or showing a modal dialog. Normal execution uses the Windows APIs directly.
+auto gNotifyIcon = &Shell_NotifyIconW;
+auto gExitMessageBox = &MessageBoxW;
+int gBuildingPage = -1;
+int gCurrentPage = 0;
+std::array<std::vector<HWND>, 5> gPageControls;
+pattern::DifficultyEstimator gDifficulty;
+pattern::Snapshot gDifficultySnapshot;
+pattern::PatternSummary gPatternSummary;
+pattern::LiveContinuity gLiveContinuity;
+report::Recorder gReportRecorder;
+std::deque<report::Session> gPendingReports;
+std::future<report::SaveResult> gReportWrite;
+bool gReportSaveFailed = false;
+bool gReportWaitForFreshSession = false;
+std::wstring gReportStatus;
+constexpr std::size_t kMaxPendingReports = 4;
+game_overlay::ForegroundClassifier gForegroundClassifier;
+game_overlay::Game gForegroundGame = game_overlay::Game::None;
+double gNextGameRaiseMs = 0;
+enum class CaptureMode { None, Sequence, Replace };
+CaptureMode gCaptureMode = CaptureMode::None;
+std::wstring gCaptureOriginal;
+std::vector<std::wstring> gCapturedKeys;
+int gCaptureIndex = -1;
+bool gCaptureWasUnapplied = false;
+std::wstring gDraftVisualPreset;
+std::array<std::wstring, 7> gDraftPresetLanes{};
+struct KeyStyleDraft { std::wstring color; std::wstring opacity = L"100"; };
+std::array<KeyStyleDraft, 256> gDraftKeyStyles{};
+UINT gStyleVk = 0;
 std::array<int, 256> gVkToLaneIndex{};
 std::array<bool, 256> gKeyDown{};
 std::array<double, 256> gPendingLaneDownMs{};
@@ -142,8 +263,75 @@ std::vector<Note> gNotes;
 std::wstring gConfigPath;
 std::wstring gIniConfigPath;
 std::wstring gJsonConfigPath;
+bool gIniSaveFailed = false;
+DWORD gConfigSaveError = ERROR_SUCCESS;
 unsigned long long gNextNoteId = 1;
 double gChordAnchorMs = -1000000.0;
+
+void ShutdownApplication();
+void RequestApplicationClose();
+void ShowSettingsWindow();
+void FinishOverlayMove(HWND hwnd);
+void FinishSessionReport(const std::string& reason, double nowMs);
+void PollReportWrites(bool wait = false);
+void UpdateGameOverlay(double nowMs);
+
+bool AddTrayIcon() {
+    if (gShuttingDown || !IsWindow(gSettingsWnd)) return false;
+    if (gTrayAdded) return true;
+    gTrayIcon = {};
+    gTrayIcon.cbSize = sizeof(gTrayIcon);
+    gTrayIcon.hWnd = gSettingsWnd;
+    gTrayIcon.uID = TRAY_ICON_ID;
+    gTrayIcon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+    gTrayIcon.uCallbackMessage = WM_APP_TRAY;
+    gTrayIcon.hIcon = LoadIconW(nullptr, IDI_APPLICATION); // shared system icon
+    lstrcpynW(gTrayIcon.szTip, L"Key Note Overlay · 설정 열기 / 우클릭 메뉴", ARRAYSIZE(gTrayIcon.szTip));
+    gTrayAdded = gNotifyIcon(NIM_ADD, &gTrayIcon) != FALSE;
+    gTrayVersion4 = false;
+    if (gTrayAdded) {
+        gTrayIcon.uVersion = NOTIFYICON_VERSION_4;
+        gTrayVersion4 = gNotifyIcon(NIM_SETVERSION, &gTrayIcon) != FALSE;
+        KillTimer(gSettingsWnd, TIMER_TRAY_RETRY);
+    } else {
+        // Explorer may be starting. Retry only while this app is running.
+        SetTimer(gSettingsWnd, TIMER_TRAY_RETRY, 5000, nullptr);
+    }
+    return gTrayAdded;
+}
+
+void RemoveTrayIcon() {
+    if (gTrayIcon.hWnd) KillTimer(gTrayIcon.hWnd, TIMER_TRAY_RETRY);
+    if (gTrayAdded) gNotifyIcon(NIM_DELETE, &gTrayIcon);
+    gTrayAdded = gTrayVersion4 = false;
+    gTrayIcon = {};
+}
+
+UINT TrayEvent(WPARAM wParam, LPARAM lParam) {
+    const UINT id = gTrayVersion4 ? HIWORD(lParam) : static_cast<UINT>(wParam);
+    return gTrayAdded && id == TRAY_ICON_ID ? (gTrayVersion4 ? LOWORD(lParam) : static_cast<UINT>(lParam)) : 0;
+}
+
+void ShowTrayMenu(HWND owner) {
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+    AppendMenuW(menu, MF_STRING, ID_TRAY_SETTINGS, L"설정 열기");
+    AppendMenuW(menu, MF_STRING | (gMoveMode ? MF_CHECKED : MF_UNCHECKED), ID_TRAY_MOVE,
+        gMoveMode ? L"오버레이 이동 모드 끝내기" : L"오버레이 마우스로 이동");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, L"종료");
+    SetMenuDefaultItem(menu, ID_TRAY_SETTINGS, FALSE);
+    POINT position{};
+    GetCursorPos(&position);
+    SetForegroundWindow(owner);
+    const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
+        position.x, position.y, 0, owner, nullptr);
+    DestroyMenu(menu);
+    // Let the shell dismiss its menu tracking before processing a close request.
+    PostMessageW(owner, WM_NULL, 0, 0);
+    if (command) PostMessageW(owner, WM_COMMAND, command, 0);
+    else if (gTrayAdded) gNotifyIcon(NIM_SETFOCUS, &gTrayIcon);
+}
 
 const std::array<COLORREF, 8> kPalette = {
     RGB(88, 213, 255),
@@ -156,10 +344,14 @@ const std::array<COLORREF, 8> kPalette = {
     RGB(248, 250, 252),
 };
 
-const std::array<Preset, 3> kPresets = {{
+const std::array<Preset, 7> kPresets = {{
     {L"5K", L"D,F,SPACE,J,K"},
     {L"8K", L"A,S,D,F,J,K,L,SEMICOLON"},
     {L"10K", L"A,S,D,F,V,N,J,K,L,SEMICOLON"},
+    {L"4K", L"D,F,J,K"},
+    {L"6K", L"S,D,F,J,K,L"},
+    {L"7K", L"S,D,F,SPACE,J,K,L"},
+    {L"9K", L"A,S,D,F,SPACE,J,K,L,SEMICOLON"},
 }};
 
 double NowMs() {
@@ -171,6 +363,14 @@ double NowMs() {
     LARGE_INTEGER now{};
     QueryPerformanceCounter(&now);
     return (static_cast<double>(now.QuadPart) * 1000.0) / static_cast<double>(freq.QuadPart);
+}
+
+void ResetDifficulty(int lanes) {
+    FinishSessionReport("분석 초기화 / 설정 변경", NowMs());
+    gReportWaitForFreshSession = false;
+    gDifficulty.Reset(lanes);
+    gPatternSummary.Reset();
+    gLiveContinuity.Reset();
 }
 
 int ClampInt(int value, int minValue, int maxValue) {
@@ -254,14 +454,41 @@ bool ReadTextFile(const std::wstring& path, std::string& out) {
 }
 
 bool WriteTextFile(const std::wstring& path, const std::string& text) {
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
+    // Same-directory staging keeps the previous settings intact until the whole
+    // payload is written, flushed and read back. Never reuse someone else's temp.
+    static unsigned long long serial = 0;
+    std::wstring staging;
+    HANDLE file = INVALID_HANDLE_VALUE;
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        staging = path + L".tmp." + std::to_wstring(GetCurrentProcessId()) + L"." + std::to_wstring(++serial);
+        file = CreateFileW(staging.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE) break;
+        if (GetLastError() != ERROR_FILE_EXISTS && GetLastError() != ERROR_ALREADY_EXISTS) return false;
+    }
+    if (file == INVALID_HANDLE_VALUE) return false;
+    DWORD error = ERROR_SUCCESS;
+    size_t offset = 0;
+    while (offset < text.size()) {
+        DWORD written = 0;
+        if (!WriteFile(file, text.data() + offset, static_cast<DWORD>(text.size() - offset), &written, nullptr) || written == 0) {
+            error = GetLastError();
+            if (error == ERROR_SUCCESS) error = ERROR_WRITE_FAULT;
+            break;
+        }
+        offset += written;
+    }
+    if (error == ERROR_SUCCESS && !FlushFileBuffers(file)) error = GetLastError();
+    if (!CloseHandle(file) && error == ERROR_SUCCESS) error = GetLastError();
+    std::string verified;
+    if (error == ERROR_SUCCESS && (!ReadTextFile(staging, verified) || verified != text)) error = ERROR_WRITE_FAULT;
+    if (error == ERROR_SUCCESS && !MoveFileExW(staging.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        error = GetLastError();
+    if (error != ERROR_SUCCESS) {
+        DeleteFileW(staging.c_str());
+        SetLastError(error);
         return false;
     }
-    DWORD written = 0;
-    BOOL ok = text.empty() || WriteFile(file, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
-    CloseHandle(file);
-    return ok && written == text.size();
+    return true;
 }
 
 void JsonSkipWs(const std::string& text, size_t& pos) {
@@ -455,35 +682,35 @@ VisualTheme CurrentTheme() {
     return VisualTheme{};
 }
 
-void ApplyVisualPreset(const std::wstring& rawPreset) {
-    gConfig.visualPreset = NormalizeVisualPreset(rawPreset);
-    if (gConfig.visualPreset == L"Neon") {
-        gConfig.opacityPercent = 94;
-        gConfig.laneSpacingPercent = 104;
-        gConfig.longNoteAlpha = 76;
-        gConfig.circleNotes = true;
-        gConfig.laneBackground = true;
-        gConfig.roundedBoxes = true;
-        gConfig.thinOutline = true;
-        gConfig.keyTextBottom = true;
-    } else if (gConfig.visualPreset == L"Minimal") {
-        gConfig.opacityPercent = 86;
-        gConfig.laneSpacingPercent = 92;
-        gConfig.longNoteAlpha = 58;
-        gConfig.circleNotes = false;
-        gConfig.laneBackground = false;
-        gConfig.roundedBoxes = true;
-        gConfig.thinOutline = true;
-        gConfig.keyTextBottom = false;
+void ApplyVisualPreset(const std::wstring& rawPreset, Config& config = gConfig) {
+    config.visualPreset = NormalizeVisualPreset(rawPreset);
+    if (config.visualPreset == L"Neon") {
+        config.opacityPercent = 94;
+        config.laneSpacingPercent = 104;
+        config.longNoteAlpha = 76;
+        config.circleNotes = true;
+        config.laneBackground = true;
+        config.roundedBoxes = true;
+        config.thinOutline = true;
+        config.keyTextBottom = true;
+    } else if (config.visualPreset == L"Minimal") {
+        config.opacityPercent = 86;
+        config.laneSpacingPercent = 92;
+        config.longNoteAlpha = 58;
+        config.circleNotes = false;
+        config.laneBackground = false;
+        config.roundedBoxes = true;
+        config.thinOutline = true;
+        config.keyTextBottom = false;
     } else {
-        gConfig.opacityPercent = 100;
-        gConfig.laneSpacingPercent = 100;
-        gConfig.longNoteAlpha = 92;
-        gConfig.circleNotes = false;
-        gConfig.laneBackground = true;
-        gConfig.roundedBoxes = true;
-        gConfig.thinOutline = true;
-        gConfig.keyTextBottom = true;
+        config.opacityPercent = 100;
+        config.laneSpacingPercent = 100;
+        config.longNoteAlpha = 92;
+        config.circleNotes = false;
+        config.laneBackground = true;
+        config.roundedBoxes = true;
+        config.thinOutline = true;
+        config.keyTextBottom = true;
     }
 }
 
@@ -548,6 +775,13 @@ bool TokenToVk(const std::wstring& raw, UINT& outVk, std::wstring& outLabel) {
         {L"SHIFT", VK_SHIFT}, {L"LSHIFT", VK_LSHIFT}, {L"RSHIFT", VK_RSHIFT},
         {L"CTRL", VK_CONTROL}, {L"LCTRL", VK_LCONTROL}, {L"RCTRL", VK_RCONTROL},
         {L"ALT", VK_MENU}, {L"LALT", VK_LMENU}, {L"RALT", VK_RMENU},
+        {L"HOME", VK_HOME}, {L"END", VK_END}, {L"INSERT", VK_INSERT}, {L"DELETE", VK_DELETE},
+        {L"PAGEUP", VK_PRIOR}, {L"PAGEDOWN", VK_NEXT}, {L"CAPSLOCK", VK_CAPITAL},
+        {L"NUM0", VK_NUMPAD0}, {L"NUM1", VK_NUMPAD1}, {L"NUM2", VK_NUMPAD2},
+        {L"NUM3", VK_NUMPAD3}, {L"NUM4", VK_NUMPAD4}, {L"NUM5", VK_NUMPAD5},
+        {L"NUM6", VK_NUMPAD6}, {L"NUM7", VK_NUMPAD7}, {L"NUM8", VK_NUMPAD8}, {L"NUM9", VK_NUMPAD9},
+        {L"NUMADD", VK_ADD}, {L"NUMSUBTRACT", VK_SUBTRACT}, {L"NUMMULTIPLY", VK_MULTIPLY},
+        {L"NUMDIVIDE", VK_DIVIDE}, {L"NUMDECIMAL", VK_DECIMAL},
         {L";", VK_OEM_1}, {L"=", VK_OEM_PLUS}, {L",", VK_OEM_COMMA},
         {L"-", VK_OEM_MINUS}, {L".", VK_OEM_PERIOD}, {L"/", VK_OEM_2},
         {L"`", VK_OEM_3}, {L"[", VK_OEM_4}, {L"\\", VK_OEM_5},
@@ -562,8 +796,9 @@ bool TokenToVk(const std::wstring& raw, UINT& outVk, std::wstring& outLabel) {
     }
 
     if (token.size() >= 2 && token[0] == L'F') {
-        int number = _wtoi(token.c_str() + 1);
-        if (number >= 1 && number <= 24) {
+        wchar_t* end = nullptr;
+        long number = std::wcstol(token.c_str() + 1, &end, 10);
+        if (end != token.c_str() + 1 && *end == L'\0' && number >= 1 && number <= 24) {
             outVk = VK_F1 + static_cast<UINT>(number - 1);
             outLabel = token;
             return true;
@@ -571,6 +806,135 @@ bool TokenToVk(const std::wstring& raw, UINT& outVk, std::wstring& outLabel) {
     }
 
     return false;
+}
+
+std::wstring TokenFromVk(UINT vk) {
+    if ((vk >= L'A' && vk <= L'Z') || (vk >= L'0' && vk <= L'9')) return std::wstring(1, static_cast<wchar_t>(vk));
+    if (vk >= VK_F1 && vk <= VK_F24) return L"F" + std::to_wstring(vk - VK_F1 + 1);
+    if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) return L"NUM" + std::to_wstring(vk - VK_NUMPAD0);
+    const wchar_t* names[] = {L"SPACE", L"ENTER", L"TAB", L"ESC", L"SHIFT", L"CTRL", L"ALT", L"BACKSPACE", L"LEFT", L"RIGHT", L"UP", L"DOWN",
+        L"LSHIFT", L"RSHIFT", L"LCTRL", L"RCTRL", L"LALT", L"RALT", L"HOME", L"END", L"INSERT", L"DELETE",
+        L"PAGEUP", L"PAGEDOWN", L"CAPSLOCK", L"NUMADD", L"NUMSUBTRACT", L"NUMMULTIPLY", L"NUMDIVIDE", L"NUMDECIMAL",
+        L"SEMICOLON", L"COMMA", L"PERIOD", L"SLASH", L"BACKSLASH", L"LBRACKET", L"RBRACKET", L"QUOTE", L"BACKTICK", L"MINUS", L"EQUALS"};
+    for (const wchar_t* name : names) {
+        UINT candidate = 0;
+        std::wstring label;
+        if (TokenToVk(name, candidate, label) && candidate == vk) return name;
+    }
+    return L"";
+}
+
+bool ParseInteger(const std::wstring& raw, int minValue, int maxValue, int& result) {
+    const std::wstring value = Trim(raw);
+    if (value.empty()) return false;
+    wchar_t* end = nullptr;
+    errno = 0;
+    long parsed = std::wcstol(value.c_str(), &end, 10);
+    if (errno == ERANGE || end == value.c_str() || *end || parsed < minValue || parsed > maxValue) return false;
+    result = static_cast<int>(parsed);
+    return true;
+}
+
+std::wstring ColorHex(COLORREF color) {
+    if (color == CLR_INVALID) return L"";
+    std::wostringstream text;
+    text << L'#' << std::uppercase << std::hex << std::setfill(L'0') << std::setw(2) << static_cast<int>(GetRValue(color))
+        << std::setw(2) << static_cast<int>(GetGValue(color)) << std::setw(2) << static_cast<int>(GetBValue(color));
+    return text.str();
+}
+
+bool ParseColor(const std::wstring& raw, COLORREF& color) {
+    std::wstring text = Trim(raw);
+    if (text.empty()) { color = CLR_INVALID; return true; }
+    if (text.front() == L'#') text.erase(text.begin());
+    if (text.size() != 6) return false;
+    unsigned rgb = 0;
+    for (wchar_t c : text) {
+        c = static_cast<wchar_t>(towupper(c));
+        int digit = c >= L'0' && c <= L'9' ? c - L'0' : c >= L'A' && c <= L'F' ? c - L'A' + 10 : -1;
+        if (digit < 0) return false;
+        rgb = rgb * 16 + digit;
+    }
+    color = RGB((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255);
+    return true;
+}
+
+COLORREF LaneColor(int lane) {
+    const auto& style = gConfig.keyStyles[gConfig.lanes[static_cast<size_t>(lane)].vk];
+    return style.color == CLR_INVALID ? kPalette[static_cast<size_t>(lane) % kPalette.size()] : style.color;
+}
+
+// Editing is strict: never silently discard a lane or replace an empty layout with 8K.
+// Loading legacy files retains the old tolerant path in RebuildLaneConfig.
+bool ValidateLaneText(const std::wstring& text, std::vector<std::wstring>& tokens, std::wstring& error) {
+    tokens.clear();
+    std::array<bool, 256> used{};
+    size_t start = 0;
+    do {
+        size_t end = text.find(L',', start);
+        std::wstring token = Trim(text.substr(start, end == std::wstring::npos ? end : end - start));
+        UINT vk = 0;
+        std::wstring label;
+        if (token.empty()) { error = L"빈 키가 있어요. 키를 입력하고 불필요한 쉼표를 지워 주세요."; return false; }
+        if (!TokenToVk(token, vk, label) || vk >= used.size()) {
+            error = L"인식할 수 없는 키: " + token;
+            return false;
+        }
+        if (used[vk]) { error = L"같은 키가 두 번 있어요: " + token; return false; }
+        used[vk] = true;
+        tokens.push_back(TokenForConfig(token));
+        if (end == std::wstring::npos) break;
+        start = end + 1;
+    } while (start <= text.size());
+    error.clear();
+    return true;
+}
+
+std::wstring JoinLaneTokens(const std::vector<std::wstring>& tokens) {
+    std::wstring result;
+    for (const auto& token : tokens) {
+        if (!result.empty()) result += L",";
+        result += token;
+    }
+    return result;
+}
+
+int PresetIndexForCount(std::size_t count) {
+    for (std::size_t i = 0; i < kPresets.size(); ++i)
+        if (count == static_cast<std::size_t>(_wtoi(kPresets[i].mode))) return static_cast<int>(i);
+    return -1;
+}
+
+void RememberPreset(std::array<std::wstring, 7>& presets, const std::wstring& text) {
+    std::vector<std::wstring> tokens;
+    std::wstring error;
+    if (!ValidateLaneText(text, tokens, error)) return;
+    const int index = PresetIndexForCount(tokens.size());
+    if (index < 0) return;
+    const auto canonical = JoinLaneTokens(tokens);
+    presets[index] = canonical == kPresets[index].lanes ? L"" : canonical;
+}
+
+void NormalizePresetLayouts() {
+    for (std::size_t i = 0; i < kPresets.size(); ++i) {
+        std::vector<std::wstring> tokens;
+        std::wstring error;
+        auto& layout = gConfig.presetLanes[i];
+        if (!ValidateLaneText(layout, tokens, error) || PresetIndexForCount(tokens.size()) != static_cast<int>(i)) layout.clear();
+        else layout = JoinLaneTokens(tokens) == kPresets[i].lanes ? L"" : JoinLaneTokens(tokens);
+    }
+    // Older saves only had the current layout. Keep it as that key-count preset.
+    RememberPreset(gConfig.presetLanes, gConfig.lanesText);
+}
+
+bool SameConfig(const Config& a, const Config& b) {
+    auto values = [](const Config& c) {
+        return std::tie(c.x, c.y, c.width, c.height, c.durationMs, c.travelPx, c.noteWidth, c.noteHeight,
+            c.opacityPercent, c.laneSpacingPercent, c.longNoteAlpha, c.visualPreset, c.debugBackground,
+            c.clickThrough, c.alwaysOnTop, c.circleNotes, c.laneBackground, c.roundedBoxes, c.thinOutline,
+            c.keyTextBottom, c.difficultyEnabled, c.difficultyHud, c.reportAutoSave, c.gameOverlay, c.lanesText, c.presetLanes, c.keyStyles);
+    };
+    return values(a) == values(b);
 }
 
 std::vector<std::wstring> SplitLaneText(const std::wstring& text) {
@@ -647,6 +1011,7 @@ void ClampAndRebuildConfig() {
     gConfig.opacityPercent = ClampInt(gConfig.opacityPercent, 20, 100);
     gConfig.laneSpacingPercent = ClampInt(gConfig.laneSpacingPercent, 50, 160);
     gConfig.longNoteAlpha = ClampInt(gConfig.longNoteAlpha, 32, 180);
+    for (auto& style : gConfig.keyStyles) style.opacity = ClampInt(style.opacity, 0, 100);
     RebuildLaneConfig();
 }
 
@@ -693,13 +1058,55 @@ void LoadIniConfig() {
     gConfig.roundedBoxes = ReadIniBool(L"overlay", L"rounded_boxes", gConfig.roundedBoxes);
     gConfig.thinOutline = ReadIniBool(L"overlay", L"thin_outline", gConfig.thinOutline);
     gConfig.keyTextBottom = ReadIniBool(L"overlay", L"key_text_bottom", gConfig.keyTextBottom);
+    gConfig.difficultyEnabled = ReadIniBool(L"overlay", L"difficulty_enabled", gConfig.difficultyEnabled);
+    gConfig.difficultyHud = ReadIniBool(L"overlay", L"difficulty_hud", gConfig.difficultyHud);
+    gConfig.reportAutoSave = ReadIniBool(L"overlay", L"report_auto_save", gConfig.reportAutoSave);
+    gConfig.gameOverlay = ReadIniBool(L"overlay", L"game_overlay", gConfig.gameOverlay);
     gConfig.mode = ReadIniString(L"input", L"mode", gConfig.mode.c_str());
     gConfig.lanesText = ReadIniString(L"input", L"lanes", gConfig.lanesText.c_str());
+    for (std::size_t i = 0; i < kPresets.size(); ++i)
+        gConfig.presetLanes[i] = ReadIniString(L"input_presets", kPresets[i].mode, L"");
+    NormalizePresetLayouts();
+    gConfig.keyStyles = {};
+    for (UINT vk = 0; vk < gConfig.keyStyles.size(); ++vk) {
+        const auto token = TokenFromVk(vk);
+        if (token.empty()) continue;
+        auto& style = gConfig.keyStyles[vk];
+        ParseColor(ReadIniString(L"key_styles", (L"color_" + token).c_str(), L""), style.color);
+        style.opacity = ClampInt(ReadIniInt(L"key_styles", (L"opacity_" + token).c_str(), 100), 0, 100);
+    }
+}
+
+bool HasCompleteJsonObject(const std::string& text) {
+    // Detect empty/truncated saves before touching gConfig so the INI fallback
+    // remains usable. Field parsing below intentionally keeps legacy tolerance.
+    size_t pos = text.compare(0, 3, "\xef\xbb\xbf") == 0 ? 3 : 0;
+    JsonSkipWs(text, pos);
+    if (pos >= text.size() || text[pos] != '{') return false;
+    std::vector<char> stack;
+    bool quoted = false, escaped = false;
+    for (; pos < text.size(); ++pos) {
+        const char c = text[pos];
+        if (quoted) {
+            if (escaped) escaped = false;
+            else if (c == '\\') escaped = true;
+            else if (c == '"') quoted = false;
+            continue;
+        }
+        if (c == '"') quoted = true;
+        else if (c == '{' || c == '[') stack.push_back(c);
+        else if (c == '}' || c == ']') {
+            if (stack.empty() || stack.back() != (c == '}' ? '{' : '[')) return false;
+            stack.pop_back();
+            if (stack.empty()) { ++pos; JsonSkipWs(text, pos); return pos == text.size(); }
+        }
+    }
+    return false;
 }
 
 bool LoadJsonConfig() {
     std::string json;
-    if (!ReadTextFile(gJsonConfigPath, json)) {
+    if (!ReadTextFile(gJsonConfigPath, json) || !HasCompleteJsonObject(json)) {
         return false;
     }
     int intValue = 0;
@@ -729,6 +1136,10 @@ bool LoadJsonConfig() {
     if (JsonReadBool(json, "rounded_boxes", boolValue)) gConfig.roundedBoxes = boolValue;
     if (JsonReadBool(json, "thin_outline", boolValue)) gConfig.thinOutline = boolValue;
     if (JsonReadBool(json, "key_text_bottom", boolValue)) gConfig.keyTextBottom = boolValue;
+    if (JsonReadBool(json, "difficulty_enabled", boolValue)) gConfig.difficultyEnabled = boolValue;
+    if (JsonReadBool(json, "difficulty_hud", boolValue)) gConfig.difficultyHud = boolValue;
+    if (JsonReadBool(json, "report_auto_save", boolValue)) gConfig.reportAutoSave = boolValue;
+    if (JsonReadBool(json, "game_overlay", boolValue)) gConfig.gameOverlay = boolValue;
     if (JsonReadString(json, "mode", stringValue)) gConfig.mode = WidenAscii(stringValue);
 
     std::vector<std::string> laneTokens;
@@ -742,6 +1153,21 @@ bool LoadJsonConfig() {
     } else if (JsonReadString(json, "lanes", stringValue)) {
         gConfig.lanesText = WidenAscii(stringValue);
     }
+    for (std::size_t i = 0; i < kPresets.size(); ++i) {
+        gConfig.presetLanes[i].clear();
+        const std::string key = "preset_" + std::to_string(_wtoi(kPresets[i].mode)) + "k";
+        if (JsonReadString(json, key.c_str(), stringValue)) gConfig.presetLanes[i] = WidenAscii(stringValue);
+    }
+    NormalizePresetLayouts();
+    gConfig.keyStyles = {};
+    for (UINT vk = 0; vk < gConfig.keyStyles.size(); ++vk) {
+        const auto wideToken = TokenFromVk(vk);
+        if (wideToken.empty()) continue;
+        const std::string token(wideToken.begin(), wideToken.end());
+        auto& style = gConfig.keyStyles[vk];
+        if (JsonReadString(json, ("key_color_" + token).c_str(), stringValue)) ParseColor(WidenAscii(stringValue), style.color);
+        if (JsonReadInt(json, ("key_opacity_" + token).c_str(), intValue)) style.opacity = ClampInt(intValue, 0, 100);
+    }
     return true;
 }
 
@@ -753,42 +1179,45 @@ void LoadConfig() {
     ClampAndRebuildConfig();
 }
 
-bool WriteIniInt(const wchar_t* section, const wchar_t* key, int value) {
-    wchar_t buffer[32]{};
-    wsprintfW(buffer, L"%d", value);
-    return WritePrivateProfileStringW(section, key, buffer, gIniConfigPath.c_str()) != FALSE;
-}
-
-bool WriteIniBool(const wchar_t* section, const wchar_t* key, bool value) {
-    return WritePrivateProfileStringW(section, key, value ? L"1" : L"0", gIniConfigPath.c_str()) != FALSE;
-}
-
 bool SaveIniConfig() {
-    bool ok = true;
-    ok = WriteIniInt(L"overlay", L"x", gConfig.x) && ok;
-    ok = WriteIniInt(L"overlay", L"y", gConfig.y) && ok;
-    ok = WriteIniInt(L"overlay", L"width", gConfig.width) && ok;
-    ok = WriteIniInt(L"overlay", L"height", gConfig.height) && ok;
-    ok = WriteIniInt(L"overlay", L"duration_ms", gConfig.durationMs) && ok;
-    ok = WriteIniInt(L"overlay", L"travel_px", gConfig.travelPx) && ok;
-    ok = WriteIniInt(L"overlay", L"note_width", gConfig.noteWidth) && ok;
-    ok = WriteIniInt(L"overlay", L"note_height", gConfig.noteHeight) && ok;
-    ok = (WritePrivateProfileStringW(L"overlay", L"visual_preset", gConfig.visualPreset.c_str(), gIniConfigPath.c_str()) != FALSE) && ok;
-    ok = WriteIniInt(L"overlay", L"opacity_percent", gConfig.opacityPercent) && ok;
-    ok = WriteIniInt(L"overlay", L"lane_spacing_percent", gConfig.laneSpacingPercent) && ok;
-    ok = WriteIniInt(L"overlay", L"long_note_alpha", gConfig.longNoteAlpha) && ok;
-    ok = WriteIniBool(L"overlay", L"debug_background", gConfig.debugBackground) && ok;
-    ok = WriteIniBool(L"overlay", L"click_through", gConfig.clickThrough) && ok;
-    ok = WriteIniBool(L"overlay", L"always_on_top", gConfig.alwaysOnTop) && ok;
-    ok = WriteIniBool(L"overlay", L"circle_notes", gConfig.circleNotes) && ok;
-    ok = WriteIniBool(L"overlay", L"lane_background", gConfig.laneBackground) && ok;
-    ok = WriteIniBool(L"overlay", L"rounded_boxes", gConfig.roundedBoxes) && ok;
-    ok = WriteIniBool(L"overlay", L"thin_outline", gConfig.thinOutline) && ok;
-    ok = WriteIniBool(L"overlay", L"key_text_bottom", gConfig.keyTextBottom) && ok;
-    ok = (WritePrivateProfileStringW(L"input", L"mode", gConfig.mode.c_str(), gIniConfigPath.c_str()) != FALSE) && ok;
-    ok = (WritePrivateProfileStringW(L"input", L"lanes", gConfig.lanesText.c_str(), gIniConfigPath.c_str()) != FALSE) && ok;
+    // Canonical mode, theme and key names are ASCII. Write a complete compatible
+    // INI in one replacement instead of leaving a partially updated set of keys.
+    auto ascii = [](const std::wstring& s) { return std::string(s.begin(), s.end()); };
+    std::ostringstream out;
+    out << "[overlay]\r\n";
+    auto field = [&](const char* key, auto value) { out << key << '=' << value << "\r\n"; };
+    field("x", gConfig.x); field("y", gConfig.y);
+    field("width", gConfig.width); field("height", gConfig.height);
+    field("duration_ms", gConfig.durationMs); field("travel_px", gConfig.travelPx);
+    field("note_width", gConfig.noteWidth); field("note_height", gConfig.noteHeight);
+    field("visual_preset", ascii(gConfig.visualPreset));
+    field("opacity_percent", gConfig.opacityPercent); field("lane_spacing_percent", gConfig.laneSpacingPercent);
+    field("long_note_alpha", gConfig.longNoteAlpha); field("debug_background", gConfig.debugBackground);
+    field("click_through", gConfig.clickThrough); field("always_on_top", gConfig.alwaysOnTop);
+    field("circle_notes", gConfig.circleNotes); field("lane_background", gConfig.laneBackground);
+    field("rounded_boxes", gConfig.roundedBoxes); field("thin_outline", gConfig.thinOutline);
+    field("key_text_bottom", gConfig.keyTextBottom);
+    field("difficulty_enabled", gConfig.difficultyEnabled); field("difficulty_hud", gConfig.difficultyHud);
+    field("report_auto_save", gConfig.reportAutoSave);
+    field("game_overlay", gConfig.gameOverlay);
+    out << "\r\n[input]\r\n";
+    field("mode", ascii(gConfig.mode)); field("lanes", ascii(CanonicalLaneText()));
+    out << "\r\n[input_presets]\r\n";
+    for (std::size_t i = 0; i < kPresets.size(); ++i)
+        if (!gConfig.presetLanes[i].empty()) out << ascii(kPresets[i].mode) << '=' << ascii(gConfig.presetLanes[i]) << "\r\n";
+    out << "\r\n[key_styles]\r\n";
+    for (UINT vk = 0; vk < gConfig.keyStyles.size(); ++vk) {
+        const auto token = TokenFromVk(vk);
+        if (token.empty()) continue;
+        const auto& style = gConfig.keyStyles[vk];
+        if (style.color != CLR_INVALID) field(("color_" + ascii(token)).c_str(), ascii(ColorHex(style.color)));
+        if (style.opacity != 100) field(("opacity_" + ascii(token)).c_str(), style.opacity);
+    }
+    if (!WriteTextFile(gIniConfigPath, out.str())) return false;
+    // Invalidate Win32's profile cache after replacing the file externally.
+    // This all-null cache-flush call returns zero even on success.
     WritePrivateProfileStringW(nullptr, nullptr, nullptr, gIniConfigPath.c_str());
-    return ok;
+    return true;
 }
 
 std::string BoolText(bool value) {
@@ -818,7 +1247,11 @@ bool SaveJsonConfig() {
     out << "    \"lane_background\": " << BoolText(gConfig.laneBackground) << ",\n";
     out << "    \"rounded_boxes\": " << BoolText(gConfig.roundedBoxes) << ",\n";
     out << "    \"thin_outline\": " << BoolText(gConfig.thinOutline) << ",\n";
-    out << "    \"key_text_bottom\": " << BoolText(gConfig.keyTextBottom) << "\n";
+    out << "    \"key_text_bottom\": " << BoolText(gConfig.keyTextBottom) << ",\n";
+    out << "    \"difficulty_enabled\": " << BoolText(gConfig.difficultyEnabled) << ",\n";
+    out << "    \"difficulty_hud\": " << BoolText(gConfig.difficultyHud) << ",\n";
+    out << "    \"report_auto_save\": " << BoolText(gConfig.reportAutoSave) << ",\n";
+    out << "    \"game_overlay\": " << BoolText(gConfig.gameOverlay) << "\n";
     out << "  },\n";
     out << "  \"input\": {\n";
     out << "    \"mode\": \"" << JsonEscape(gConfig.mode) << "\",\n";
@@ -828,15 +1261,38 @@ bool SaveJsonConfig() {
         if (i != 0) out << ", ";
         out << "\"" << JsonEscape(lanes[i]) << "\"";
     }
-    out << "]\n";
-    out << "  }\n";
-    out << "}\n";
+    out << "]";
+    for (std::size_t i = 0; i < kPresets.size(); ++i)
+        if (!gConfig.presetLanes[i].empty())
+            out << ",\n    \"preset_" << _wtoi(kPresets[i].mode) << "k\": \"" << JsonEscape(gConfig.presetLanes[i]) << "\"";
+    out << "\n";
+    out << "  },\n  \"key_styles\": {";
+    bool firstStyle = true;
+    for (UINT vk = 0; vk < gConfig.keyStyles.size(); ++vk) {
+        const auto wideToken = TokenFromVk(vk);
+        if (wideToken.empty()) continue;
+        const std::string token(wideToken.begin(), wideToken.end());
+        const auto& style = gConfig.keyStyles[vk];
+        auto separator = [&]() { out << (firstStyle ? "\n" : ",\n"); firstStyle = false; };
+        if (style.color != CLR_INVALID) {
+            separator(); out << "    \"key_color_" << token << "\": \"" << JsonEscape(ColorHex(style.color)) << "\"";
+        }
+        if (style.opacity != 100) { separator(); out << "    \"key_opacity_" << token << "\": " << style.opacity; }
+    }
+    out << "\n  }\n}\n";
     return WriteTextFile(gJsonConfigPath, out.str());
 }
 
 bool SaveConfig() {
     ClampAndRebuildConfig();
-    return SaveJsonConfig() && SaveIniConfig();
+    gIniSaveFailed = false;
+    gConfigSaveError = ERROR_SUCCESS;
+    if (!SaveJsonConfig()) { gConfigSaveError = GetLastError(); return false; }
+    // JSON is authoritative at startup. A compatibility-copy failure must not
+    // pretend that successfully committed settings disappeared.
+    gIniSaveFailed = !SaveIniConfig();
+    if (gIniSaveFailed) gConfigSaveError = GetLastError();
+    return true;
 }
 
 void SetStatus(const std::wstring& text) {
@@ -856,61 +1312,387 @@ std::wstring WindowText(HWND hwnd) {
     return value;
 }
 
-int WindowInt(HWND hwnd, int fallback, int minValue, int maxValue) {
-    BOOL ok = FALSE;
-    int value = GetDlgItemInt(gSettingsWnd, GetDlgCtrlID(hwnd), &ok, TRUE);
-    if (!ok) {
-        return fallback;
+std::wstring DifficultyProfileName() {
+    switch (pattern::ProfileForKeys(static_cast<int>(gConfig.lanes.size()))) {
+    case pattern::RatingProfile::Osu4: return L"Reform 4K";
+    case pattern::RatingProfile::Osu7: return L"Jinjin 7K";
+    case pattern::RatingProfile::Osu8: return L"Regular 8K";
+    case pattern::RatingProfile::Osu10: return L"Revive 10K";
+    case pattern::RatingProfile::Aery5: return L"AERY 5K";
+    default: return L"입력 지수";
     }
-    return std::max(minValue, std::min(maxValue, value));
 }
 
-void RefreshKeyMapStatus() {
-    std::wstringstream status;
-    status << gConfig.mode << L" lanes: ";
-    for (size_t i = 0; i < gConfig.lanes.size(); ++i) {
-        if (i != 0) status << L" ";
-        status << gConfig.lanes[i].label;
+std::wstring FormatDifficultyRating(const pattern::Snapshot& s) {
+    std::wostringstream out;
+    out << std::fixed;
+    if (s.outsideCalibration < 0) out << L"<";
+    if (s.outsideCalibration > 0) out << L">";
+    switch (s.profile) {
+    case pattern::RatingProfile::Osu4: case pattern::RatingProfile::Osu7: case pattern::RatingProfile::Osu8: case pattern::RatingProfile::Osu10:
+        return pattern::FormatDan(s.profile, pattern::EstimateDan(s));
+    case pattern::RatingProfile::Aery5: out << L"⑤" << std::setprecision(1) << s.rating; break;
+    default: out << std::setprecision(0) << s.score << L"/100"; break;
     }
-    if (gConfig.lanes.empty()) {
-        status << L"(none)";
+    return out.str();
+}
+
+std::wstring DifficultyValue() {
+    if (!gConfig.difficultyEnabled || gCaptureMode != CaptureMode::None) return L"정지";
+    if (gDifficultySnapshot.limited) return L"보류";
+    if (gDifficultySnapshot.idle) return L"대기";
+    if (!gDifficultySnapshot.ready) return L"분석 중";
+    return FormatDifficultyRating(gDifficultySnapshot);
+}
+
+std::wstring PreviousPatternValue() {
+    const auto& completed = gPatternSummary.Completed();
+    if (!completed.ready) return L"측정이 끝나면 표시됩니다.";
+    const auto dan = pattern::EstimateDan(completed);
+    return FormatDifficultyRating(completed) + (dan.available && dan.outside == 0 && dan.height == pattern::DanHeight::Level ?
+        L"의 난이도입니다." : L" 난이도입니다.");
+}
+
+void EnsureHudFonts() {
+    auto make = [](int size, int weight) {
+        return CreateFontW(size, 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Malgun Gothic");
+    };
+    if (!gHudValueFont) gHudValueFont = make(38, FW_BOLD);
+    if (!gHudSmallFont) gHudSmallFont = make(22, FW_BOLD);
+    if (!gHudLabelFont) gHudLabelFont = make(13, FW_NORMAL);
+}
+
+void DestroyHudFonts() {
+    for (HFONT* font : {&gHudValueFont, &gHudSmallFont, &gHudLabelFont}) {
+        if (*font) DeleteObject(*font);
+        *font = nullptr;
     }
-    SetStatus(status.str());
+}
+
+HFONT FitDifficultyFont(HDC dc, const std::wstring& text, int width, HFONT preferred) {
+    HGDIOBJ old = SelectObject(dc, preferred);
+    HFONT chosen = preferred;
+    for (HFONT font : {preferred, gHudSmallFont, gGuiFont, gHudLabelFont}) {
+        if (!font) continue;
+        SelectObject(dc, font);
+        chosen = font;
+        SIZE extent{};
+        GetTextExtentPoint32W(dc, text.c_str(), static_cast<int>(text.size()), &extent);
+        if (extent.cx <= width) break;
+    }
+    SelectObject(dc, old);
+    return chosen;
+}
+
+void SetDifficultyText(HWND control, const std::wstring& text) {
+    if (!control) return;
+    RECT bounds{}; GetClientRect(control, &bounds);
+    HDC dc = GetDC(control);
+    HFONT font = FitDifficultyFont(dc, text, bounds.right - 2, gHudSmallFont);
+    ReleaseDC(control, dc);
+    SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    SetWindowTextW(control, text.c_str());
+}
+
+std::wstring DifficultyDetails(bool multiline) {
+    const auto& s = gDifficultySnapshot;
+    std::wostringstream out;
+    out << std::fixed << std::setprecision(1);
+    if (multiline) {
+        out << L"8초 평균  " << s.nps << L" NPS     |     순간 밀도  " << s.burstNps << L" NPS (2초)\n"
+            << L"동시치기  " << s.chordPercent << L" %     |     최대 " << s.maxChord << L"키 동시\n"
+            << L"같은 키 연타  " << s.jackPercent << L" %\n"
+            << L"홀드 중 추가 입력  " << s.holdOverlapPercent << L" %\n"
+            << L"최근 8초 입력  " << s.samples << L"회     |     누르고 있는 키  " << s.heldKeys << L"개";
+        if (s.retained) out << L"\n입력 연결 대기 · 마지막 추정 유지 (10초 무입력 시 결과 확정)";
+        else if (s.ready && s.ratingError > 0) out << L"\n기존 보정 오차  ±" << s.ratingError << L" 단계 · 저레벨·LN 조정 전 검증값";
+        const auto dan = pattern::EstimateDan(s);
+        if (s.ready && dan.available && !s.retained) {
+            out << L"\n기준: " << pattern::DanBasis(s.profile) << L"  |  참고 ★" << std::setprecision(2) << s.stars;
+            if (s.profile == pattern::RatingProfile::Osu10) out << L"  |  패턴 " << s.rating;
+            if (dan.outside != 0) out << (dan.outside < 0 ? L"  |  기준 최저 미만 ↓" : L"  |  기준 최고 초과 ↑");
+            else out << L"  |  구간 상당";
+        }
+    } else {
+        out << s.nps << L" NPS  |  순간 " << s.burstNps << L"  |  동시 " << s.maxChord << L"K  |  연타 " << s.jackPercent << L"%";
+    }
+    return out.str();
+}
+
+std::filesystem::path ReportDirectory() {
+    return std::filesystem::path(gJsonConfigPath).parent_path() / L"reports";
+}
+
+std::string ReportStartTime() {
+    SYSTEMTIME time{};
+    GetLocalTime(&time);
+    char text[64];
+    std::snprintf(text, sizeof(text), "%04u-%02u-%02u %02u:%02u:%02u (local)",
+        time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute, time.wSecond);
+    return text;
+}
+
+void FinishSessionReport(const std::string& reason, double nowMs) {
+    if (!gReportRecorder.Active()) return;
+    auto session = gReportRecorder.Take(reason, nowMs);
+    if (session.presses) gPendingReports.push_back(std::move(session));
+    // This can run inside the hook: queue only, never render HTML or touch disk.
+}
+
+void ObserveSessionReport(const pattern::Snapshot& snapshot, double nowMs) {
+    if (!gReportRecorder.Active()) return;
+    if (gReportRecorder.Finished(nowMs)) FinishSessionReport("마지막 입력 후 10초 · 자동 완료", nowMs);
+    else gReportRecorder.Observe(snapshot, nowMs);
+}
+
+void PollReportWrites(bool wait) {
+    do {
+        if (gReportWrite.valid()) {
+            if (!wait && gReportWrite.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) return;
+            report::SaveResult result;
+            try { result = gReportWrite.get(); }
+            catch (...) { result.error = ERROR_NOT_ENOUGH_MEMORY; }
+            if (result.ok) {
+                gPendingReports.pop_front();
+                gReportStatus = L"저장 완료: " + result.path.filename().wstring();
+                gReportSaveFailed = false;
+            } else {
+                gReportSaveFailed = true;
+                gReportStatus = L"저장 실패 (오류 " + std::to_wstring(result.error) + L"). 기록을 보관 중입니다. [저장 재시도]를 눌러 주세요.";
+            }
+        }
+        if (gPendingReports.empty() || gReportSaveFailed) return;
+        try {
+            // The worker owns a copy; the queue retains the original until a
+            // successful atomic save, including on disk-full/permission failures.
+            gReportWrite = std::async(std::launch::async, report::Save, gPendingReports.front(), ReportDirectory());
+        } catch (...) {
+            gReportSaveFailed = true;
+            gReportStatus = L"리포트 저장 작업을 시작하지 못했어요. [저장 재시도]를 눌러 주세요.";
+        }
+    } while (wait && !gReportSaveFailed);
+}
+
+void RefreshReportStatus() {
+    std::wstring status = gReportStatus;
+    if (gReportWrite.valid()) status = L"완료한 연주 리포트를 저장하고 있어요.";
+    else if (gPendingReports.size() >= kMaxPendingReports)
+        status = L"미저장 리포트 4개: 새 기록을 일시 중지했어요. 폴더 권한·공간 확인 후 저장 재시도.";
+    else if (!gReportSaveFailed && gReportRecorder.Active()) status = L"기록 중 · 마지막 입력 후 10초가 지나면 자동 저장합니다.";
+    else if (!gReportSaveFailed && gConfig.reportAutoSave && gReportWaitForFreshSession)
+        status = L"저장 복구 완료 · 10초간 입력을 멈춘 뒤 시작하는 새 연주부터 기록합니다.";
+    else if (status.empty()) status = gConfig.reportAutoSave ? L"저장 대기 · 설정 폴더의 reports에 HTML로 저장합니다." : L"자동 저장 꺼짐 · 켜고 [적용 + 저장]하면 레인·타이밍을 기록합니다.";
+    SetDlgItemTextW(gSettingsWnd, IDC_REPORT_STATUS, status.c_str());
+    EnableWindow(GetDlgItem(gSettingsWnd, IDC_REPORT_RETRY), gReportSaveFailed);
+}
+
+void RefreshDifficultyDisplay(double nowMs = NowMs()) {
+    UpdateGameOverlay(nowMs);
+    HWND headline = GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_SCORE);
+    HWND metrics = GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_METRICS);
+    const std::wstring oldTitle = WindowText(headline);
+    const std::wstring oldDetails = WindowText(metrics);
+    HWND npsControl = GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_NPS);
+    const std::wstring oldNps = WindowText(npsControl);
+    HWND previousControl = GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_PREVIOUS);
+    const std::wstring oldPrevious = WindowText(previousControl);
+    gDifficultySnapshot = gConfig.difficultyEnabled && gCaptureMode == CaptureMode::None ?
+        gLiveContinuity.Update(gDifficulty.Evaluate(nowMs, true), nowMs) : pattern::Snapshot{};
+    if (gConfig.difficultyEnabled && gCaptureMode == CaptureMode::None) gPatternSummary.Observe(gDifficultySnapshot);
+    ObserveSessionReport(gDifficultySnapshot, nowMs);
+    PollReportWrites();
+    RefreshReportStatus();
+    const std::wstring title = DifficultyValue();
+    const std::wstring details = DifficultyDetails(true);
+    const std::wstring previous = PreviousPatternValue();
+    if (oldPrevious != previous) SetDifficultyText(previousControl, previous);
+    SetDlgItemTextW(gSettingsWnd, IDC_DIFFICULTY_PROFILE,
+        (DifficultyProfileName() + (gDifficultySnapshot.retained ? L" · 연결 대기" : L" · 분석")).c_str());
+    std::wostringstream nps;
+    nps << std::fixed << std::setprecision(1) << L"NPS  " << gDifficultySnapshot.currentNps;
+    if (npsControl && oldNps != nps.str()) SetWindowTextW(npsControl, nps.str().c_str());
+    if (oldTitle != title) SetDifficultyText(headline, title);
+    if (metrics && oldDetails != details) SetWindowTextW(metrics, details.c_str());
+    double bar = gDifficultySnapshot.score;
+    switch (gDifficultySnapshot.profile) {
+    case pattern::RatingProfile::Osu4: case pattern::RatingProfile::Osu7: case pattern::RatingProfile::Osu8: case pattern::RatingProfile::Osu10:
+        bar = pattern::EstimateDan(gDifficultySnapshot).progress; break;
+    case pattern::RatingProfile::Aery5: bar = gDifficultySnapshot.rating / 20.5 * 100.0; break;
+    default: break;
+    }
+    SendDlgItemMessageW(gSettingsWnd, IDC_DIFFICULTY_BAR, PBM_SETPOS,
+        gDifficultySnapshot.ready ? static_cast<WPARAM>(ClampInt(static_cast<int>(std::round(bar)), 0, 100)) : 0, 0);
+    if (gOverlayWnd && gConfig.difficultyEnabled && gConfig.difficultyHud &&
+        (oldTitle != title || oldDetails != details || oldNps != nps.str() || oldPrevious != previous)) InvalidateRect(gOverlayWnd, nullptr, FALSE);
+}
+
+int DifficultyHeaderHeight(int width, int height) {
+    if (!gConfig.difficultyEnabled || !gConfig.difficultyHud) return 0;
+    return width < 600 || height >= 180 ? 76 : 56;
+}
+
+void DrawDifficultyHud(HDC dc, int width, int headerHeight) {
+    if (headerHeight == 0) return;
+    EnsureHudFonts();
+    const bool large = width >= 500 && headerHeight >= 76;
+    const COLORREF colors[] = {RGB(112, 229, 255), RGB(169, 245, 180), RGB(255, 222, 138)};
+    std::wostringstream nps;
+    nps << std::fixed << std::setprecision(1) << gDifficultySnapshot.currentNps;
+    std::wstring label = DifficultyProfileName() + (gDifficultySnapshot.retained ? L" · 유지" : L" · 추정");
+    if (large && gDifficultySnapshot.ready && gDifficultySnapshot.ratingError > 0) {
+        std::wostringstream error;
+        error << std::fixed << std::setprecision(1) << L" · 기존 ±" << gDifficultySnapshot.ratingError;
+        label += error.str();
+    }
+    const std::wstring labels[] = {label, L"아까 쳤던 패턴은:", L"NPS · 최근 1초"};
+    const std::wstring values[] = {DifficultyValue(), PreviousPatternValue(), nps.str()};
+    HGDIOBJ oldFont = SelectObject(dc, gHudLabelFont ? gHudLabelFont : gGuiFont);
+    SetBkMode(dc, TRANSPARENT);
+    const int side = std::min(220, width / 4);
+    for (int i = 0; i < 3; ++i) {
+        const bool stacked = width < 600;
+        RECT panel = stacked ? RECT{4, i == 0 ? 0 : i == 1 ? 24 : 52, width - 4, i == 0 ? 24 : i == 1 ? 52 : 76} :
+            RECT{i == 0 ? 4 : i == 1 ? side + 2 : width - side + 2, 2,
+                i == 0 ? side - 2 : i == 1 ? width - side - 2 : width - 4, headerHeight - 2};
+        HBRUSH brush = CreateSolidBrush(RGB(10, 16, 26));
+        FillRect(dc, &panel, brush); DeleteObject(brush);
+        RECT accent{panel.left, panel.bottom - (stacked ? 1 : 3), panel.right, panel.bottom};
+        brush = CreateSolidBrush(colors[i]); FillRect(dc, &accent, brush); DeleteObject(brush);
+        SelectObject(dc, gHudLabelFont ? gHudLabelFont : gGuiFont);
+        SetTextColor(dc, RGB(209, 221, 235));
+        if (stacked && i == 1) {
+            RECT summary{panel.left + 3, panel.top, panel.right - 3, panel.bottom - 1};
+            std::wstring message = labels[i] + L"\n" + values[i];
+            SetTextColor(dc, colors[i]);
+            DrawTextW(dc, message.c_str(), -1, &summary, DT_CENTER | DT_NOPREFIX);
+            continue;
+        }
+        RECT caption = stacked ? RECT{panel.left + 4, panel.top, width - 114, panel.bottom - 1} :
+            RECT{panel.left + 4, 3, panel.right - 4, 22};
+        DrawTextW(dc, labels[i].c_str(), -1, &caption, DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+        SelectObject(dc, large && !stacked && i != 1 ? gHudValueFont : gHudSmallFont);
+        SetTextColor(dc, colors[i]);
+        RECT number = stacked ? RECT{width - 112, panel.top, panel.right - 3, panel.bottom - 1} :
+            RECT{panel.left + 3, 20, panel.right - 3, panel.bottom - 3};
+        SelectObject(dc, FitDifficultyFont(dc, values[i], number.right - number.left,
+            large && !stacked && i != 1 ? gHudValueFont : gHudSmallFont));
+        DrawTextW(dc, values[i].c_str(), -1, &number, DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+    }
+    SelectObject(dc, oldFont);
+}
+
+bool GameInputAllowed() {
+    if (!gConfig.gameOverlay) return true;
+    HWND foreground = GetForegroundWindow();
+    return game_overlay::AllowsInput(true, gForegroundClassifier.Identify(foreground),
+        foreground == gSettingsWnd && gCurrentPage == 3);
+}
+
+void RecordDifficultyInput(int lane, bool down, double timeMs) {
+    if (!gConfig.difficultyEnabled || gCaptureMode != CaptureMode::None) return;
+    if (lane < 0 || lane >= static_cast<int>(gConfig.lanes.size()) || !std::isfinite(timeMs) || timeMs < 0) return;
+    // Typing configuration values is not a pattern. Releases still close holds
+    // started in the game, so switching to settings cannot leave phantom holds.
+    if (down && (!GameInputAllowed() || gPickingColor || (GetForegroundWindow() == gSettingsWnd && gCurrentPage != 3))) return;
+    const bool wasHeld = gDifficulty.IsHeld(lane);
+    bool startsFreshSession = false;
+    if (down) {
+        // Publish a finished session even if the UI timer was delayed until the
+        // first key of the next session. The estimator may reset on this keydown.
+        const auto before = gLiveContinuity.Update(gDifficulty.Evaluate(timeMs, true), timeMs);
+        startsFreshSession = before.idle;
+        gPatternSummary.Observe(before);
+        ObserveSessionReport(before, timeMs);
+        gDifficulty.KeyDown(lane, timeMs);
+    }
+    else gDifficulty.KeyUp(lane, timeMs);
+    if (wasHeld != gDifficulty.IsHeld(lane)) {
+        gLiveContinuity.RecordActivity(timeMs);
+        if (gConfig.reportAutoSave) {
+            if (down && !gReportRecorder.Active()) {
+                if (gPendingReports.size() >= kMaxPendingReports) gReportWaitForFreshSession = true;
+                else if (!gReportWaitForFreshSession || startsFreshSession) {
+                    gReportWaitForFreshSession = false;
+                    gReportRecorder.Begin(static_cast<int>(gConfig.lanes.size()), timeMs, ReportStartTime());
+                }
+            }
+            gReportRecorder.Key(lane, down, timeMs);
+        }
+    }
 }
 
 void ApplyOverlayWindowStyle() {
     if (!gOverlayWnd) return;
 
-    LONG_PTR ex = GetWindowLongPtrW(gOverlayWnd, GWL_EXSTYLE);
-    ex &= ~WS_EX_TOOLWINDOW;
-    ex |= WS_EX_LAYERED | WS_EX_APPWINDOW | WS_EX_NOACTIVATE;
-    if (gConfig.clickThrough) {
-        ex |= WS_EX_TRANSPARENT;
-    } else {
-        ex &= ~WS_EX_TRANSPARENT;
-    }
+    const LONG_PTR ex = game_overlay::ExtendedStyle(GetWindowLongPtrW(gOverlayWnd, GWL_EXSTYLE),
+        gConfig.gameOverlay, gConfig.clickThrough, gMoveMode);
     SetWindowLongPtrW(gOverlayWnd, GWL_EXSTYLE, ex);
-    BYTE opacity = static_cast<BYTE>(ClampInt(gConfig.opacityPercent, 20, 100) * 255 / 100);
-    SetLayeredWindowAttributes(gOverlayWnd, kTransparentKey, opacity, LWA_COLORKEY | LWA_ALPHA);
+    // Presentation uses per-pixel alpha. Calling SetLayeredWindowAttributes here
+    // would disable UpdateLayeredWindow until WS_EX_LAYERED is reset.
 
     SetWindowPos(
         gOverlayWnd,
-        gConfig.alwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST,
+        gConfig.gameOverlay || gConfig.alwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST,
         gConfig.x,
         gConfig.y,
         gConfig.width,
         gConfig.height,
-        SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED
+        SWP_NOACTIVATE | SWP_FRAMECHANGED | (gUiSelfTest ? 0 : SWP_SHOWWINDOW)
     );
     InvalidateRect(gOverlayWnd, nullptr, FALSE);
 }
 
+void ToggleOverlayMoveMode() {
+    gMoveMode = !gMoveMode;
+    ApplyOverlayWindowStyle();
+    SetWindowTextW(GetDlgItem(gSettingsWnd, IDC_MOVE_MODE), gMoveMode ? L"이동 모드 끝내기" : L"마우스로 위치 이동");
+    SetStatus(gMoveMode ? L"오버레이를 잡아 끌어 주세요. 놓은 위치는 자동 저장됩니다. 끝나면 이동 모드를 꺼 주세요." :
+        L"이동 모드를 끝냈어요. 원래 클릭 통과 설정으로 돌아갑니다.");
+}
+
 void ResetInputRuntimeState() {
+    gReportRecorder.ReleaseAll(NowMs());
+    gDifficulty.ReleaseAll(NowMs());
+    // Events posted for the old lane order must not run after a layout edit.
+    if (gOverlayWnd) {
+        MSG pending{};
+        while (PeekMessageW(&pending, gOverlayWnd, WM_APP_KEY_DOWN, WM_APP_KEY_UP, PM_REMOVE)) {}
+    }
     gNotes.clear();
     gKeyDown.fill(false);
     gPendingLaneDownMs.fill(0.0);
     gPendingLaneUpMs.fill(0.0);
     gChordAnchorMs = -1000000.0;
+}
+
+void RefreshGameOverlay(game_overlay::Game game, double nowMs) {
+    if (gConfig.gameOverlay && gForegroundGame != game_overlay::Game::None && game != gForegroundGame) {
+        ResetInputRuntimeState(); // Alt-Tab cannot leave an indefinitely held note.
+        gLiveContinuity.RecordActivity(nowMs);
+    }
+    const bool changed = game != gForegroundGame;
+    gForegroundGame = game;
+    if (gConfig.gameOverlay && gOverlayWnd && !gUiSelfTest) {
+        // Switching to Discord/OBS must not hide or suspend their capture source.
+        // Foreground detection still filters input and releases old held notes.
+        if (changed || nowMs >= gNextGameRaiseMs || !IsWindowVisible(gOverlayWnd)) {
+            // Games may raise their own topmost window on focus/display changes.
+            // Raise our independent window without activating it or touching theirs.
+            SetWindowPos(gOverlayWnd, HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            gNextGameRaiseMs = nowMs + 500;
+        }
+    }
+    const wchar_t* status = !gConfig.gameOverlay ? L"OBS / 바탕화면 모드" : gMoveMode ? L"위치 이동 미리보기 · 끝내도 표시 유지" :
+        game == game_overlay::Game::Osu ? L"osu! 감지 · 입력 분석 중" :
+        game == game_overlay::Game::Qwilight ? L"Qwilight 감지 · 입력 분석 중" : L"표시 유지 · osu! / Qwilight 입력 대기";
+    if (WindowText(GetDlgItem(gSettingsWnd, IDC_GAME_STATUS)) != status)
+        SetDlgItemTextW(gSettingsWnd, IDC_GAME_STATUS, status);
+}
+
+void UpdateGameOverlay(double nowMs) {
+    RefreshGameOverlay(gConfig.gameOverlay ? gForegroundClassifier.Identify(GetForegroundWindow()) : game_overlay::Game::None, nowMs);
 }
 
 Note* FindActiveNote(int lane) {
@@ -937,7 +1719,8 @@ void BeginLaneHold(int lane) {
     note.pressMs = AlignChordPressMs(eventMs);
     note.releaseMs = -1.0;
     note.held = true;
-    note.color = kPalette[static_cast<size_t>(lane) % kPalette.size()];
+    note.color = LaneColor(lane);
+    note.opacity = gConfig.keyStyles[gConfig.lanes[static_cast<size_t>(lane)].vk].opacity;
     gNotes.push_back(std::move(note));
     if (gNotes.size() > 256) {
         gNotes.erase(gNotes.begin(), gNotes.begin() + static_cast<std::ptrdiff_t>(gNotes.size() - 256));
@@ -972,7 +1755,8 @@ void SpawnTapNote(int lane) {
     note.pressMs = eventMs;
     note.releaseMs = note.pressMs + 40.0;
     note.held = false;
-    note.color = kPalette[static_cast<size_t>(lane) % kPalette.size()];
+    note.color = LaneColor(lane);
+    note.opacity = gConfig.keyStyles[gConfig.lanes[static_cast<size_t>(lane)].vk].opacity;
     gNotes.push_back(std::move(note));
     if (gNotes.size() > 256) {
         gNotes.erase(gNotes.begin(), gNotes.begin() + static_cast<std::ptrdiff_t>(gNotes.size() - 256));
@@ -997,23 +1781,23 @@ void DrawKeyLabel(HDC dc, const RECT& body, const std::wstring& text, COLORREF c
     SelectObject(dc, oldFont);
 }
 
-void PaintOverlay(HWND hwnd) {
-    PAINTSTRUCT ps{};
-    HDC dc = BeginPaint(hwnd, &ps);
-    RECT client{};
-    GetClientRect(hwnd, &client);
-    int width = client.right - client.left;
-    int height = client.bottom - client.top;
-
-    HDC mem = CreateCompatibleDC(dc);
-    HBITMAP bitmap = CreateCompatibleBitmap(dc, width, height);
-    HGDIOBJ oldBitmap = SelectObject(mem, bitmap);
-
+bool RenderOverlay(overlay::AlphaSurface& frame, double now) {
+    if (!frame) return false;
+    const int width = frame.width, height = frame.height;
+    RECT client{0,0,width,height};
+    HDC mem = frame.dc;
+    frame.ClearGdi(client, kTransparentKey);
     VisualTheme theme = CurrentTheme();
-    COLORREF canvasColor = gConfig.debugBackground ? theme.background : kTransparentKey;
+    // A transparent pixel cannot receive mouse hits; move mode needs a solid canvas.
+    const bool debugBackground = gConfig.debugBackground && !gConfig.gameOverlay;
+    COLORREF canvasColor = (debugBackground || gMoveMode) ? theme.background : kTransparentKey;
     HBRUSH bg = CreateSolidBrush(canvasColor);
-    FillRect(mem, &client, bg);
+    if (debugBackground || gMoveMode) FillRect(mem, &client, bg);
     DeleteObject(bg);
+
+    const int contentTop = DifficultyHeaderHeight(width, height);
+    const int savedDc = SaveDC(mem);
+    IntersectClipRect(mem, 0, contentTop, width, height);
 
     int laneCount = static_cast<int>(gConfig.lanes.size());
     int margin = std::max(24, width / 24);
@@ -1038,7 +1822,7 @@ void PaintOverlay(HWND hwnd) {
         for (int i = 0; i < laneCount; ++i) {
             int x = laneCenterX(i);
             int laneW = std::max(24, std::min(96, laneSlotW - 8));
-            RoundRect(mem, x - laneW / 2, 5, x + laneW / 2, height - 5, 8, 8);
+            RoundRect(mem, x - laneW / 2, contentTop + 5, x + laneW / 2, height - 5, 8, 8);
         }
         SelectObject(mem, oldPen);
         SelectObject(mem, oldBrush);
@@ -1046,7 +1830,7 @@ void PaintOverlay(HWND hwnd) {
         DeleteObject(laneBrush);
     }
 
-    if (gConfig.debugBackground && laneCount > 0) {
+    if (debugBackground && laneCount > 0) {
         HPEN gridPen = CreatePen(PS_SOLID, 1, BlendColor(theme.laneLine, canvasColor, 118));
         HGDIOBJ oldPen = SelectObject(mem, gridPen);
         for (int i = 0; i < laneCount; ++i) {
@@ -1058,19 +1842,47 @@ void PaintOverlay(HWND hwnd) {
         DeleteObject(gridPen);
     }
 
-    double now = NowMs();
     gNotes.erase(std::remove_if(gNotes.begin(), gNotes.end(), [&](const Note& note) {
         return !note.held && now - note.releaseMs >= gConfig.durationMs;
     }), gNotes.end());
 
+    RestoreDC(mem, savedDc);
+    DrawDifficultyHud(mem, width, contentTop);
+    if (gMoveMode) {
+        HBRUSH border = CreateSolidBrush(RGB(112, 229, 255));
+        FrameRect(mem, &client, border);
+        DeleteObject(border);
+        RECT hint{4, std::max(0, height - 25), width - 4, height - 2};
+        HBRUSH hintBg = CreateSolidBrush(theme.background);
+        FillRect(mem, &hint, hintBg);
+        DeleteObject(hintBg);
+        auto oldFont = SelectObject(mem, gGuiFont);
+        SetBkMode(mem, TRANSPARENT);
+        SetTextColor(mem, RGB(112, 229, 255));
+        DrawTextW(mem, L"이동 모드 · 놓으면 위치 저장", -1, &hint, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(mem, oldFont);
+    }
+    frame.FinishGdi();
+    if (gNotes.empty()) return true;
+    overlay::AlphaSurface noteLayer(width,height);
+    if (!noteLayer) return false;
+    mem = noteLayer.dc;
+    const int noteBottom = gMoveMode ? std::max(contentTop, height - 25) : height;
+    IntersectClipRect(mem, gMoveMode ? 1 : 0, std::max(contentTop, gMoveMode ? 1 : 0), width - (gMoveMode ? 1 : 0), noteBottom);
+
     for (const Note& note : gNotes) {
         if (laneCount <= 0) break;
+        if (note.lane < 0 || note.lane >= laneCount || note.opacity <= 0) continue;
         double pressAge = std::max(0.0, now - note.pressMs);
         double releaseAge = note.held ? 0.0 : std::max(0.0, now - note.releaseMs);
         double holdMs = note.held ? pressAge : std::max(0.0, note.releaseMs - note.pressMs);
-        double speed = static_cast<double>(gConfig.travelPx) / static_cast<double>(std::max(1, gConfig.durationMs));
-        double headTravel = std::min(static_cast<double>(gConfig.travelPx), speed * pressAge);
-        double tailTravel = note.held ? 0.0 : std::min(static_cast<double>(gConfig.travelPx), speed * releaseAge);
+        // Reserve HUD space without covering note heads; turning the HUD off
+        // restores the original travel distance and rendering geometry.
+        const int effectiveHeight = gConfig.circleNotes ? std::min(gConfig.noteWidth, std::max(gConfig.noteHeight, 42)) : gConfig.noteHeight;
+        const int travel = contentTop > 0 ? std::min(gConfig.travelPx, std::max(0, height - effectiveHeight - 16 - contentTop)) : gConfig.travelPx;
+        double speed = static_cast<double>(travel) / static_cast<double>(std::max(1, gConfig.durationMs));
+        double headTravel = std::min(static_cast<double>(travel), speed * pressAge);
+        double tailTravel = note.held ? 0.0 : std::min(static_cast<double>(travel), speed * releaseAge);
         double fadeT = note.held ? 0.0 : std::max(0.0, std::min(1.0, releaseAge / gConfig.durationMs));
         int laneX = laneCenterX(note.lane);
         int noteW = ClampInt(gConfig.noteWidth, 24, 220);
@@ -1085,6 +1897,11 @@ void PaintOverlay(HWND hwnd) {
         int alphaFade = note.held || fadeT < 0.68 ? 255 : static_cast<int>(std::round(255.0 * (1.0 - fadeT) / 0.32));
         alphaFade = std::max(32, std::min(255, alphaFade));
 
+        // Clear/composite only this note's horizontal strip, including the
+        // largest pulse ring and shadow. The HUD stays outside the clip region.
+        RECT noteRegion{laneX-noteW/2-28,contentTop,laneX+noteW/2+28,noteBottom};
+        noteRegion = noteLayer.Bounds(noteRegion);
+        noteLayer.ClearGdi(noteRegion, canvasColor);
         COLORREF bodyColor = note.color;
         if (alphaFade < 255) {
             bodyColor = BlendColor(bodyColor, canvasColor, alphaFade);
@@ -1195,17 +2012,43 @@ void PaintOverlay(HWND hwnd) {
         DeleteObject(shinePen);
 
         DrawKeyLabel(mem, body, note.label, theme.text);
+        frame.CompositeGdi(noteLayer, noteRegion, note.opacity);
     }
 
-    BitBlt(dc, 0, 0, width, height, mem, 0, 0, SRCCOPY);
-    SelectObject(mem, oldBitmap);
-    DeleteObject(bitmap);
-    DeleteDC(mem);
+    return true;
+}
+
+bool PresentOverlay(HWND hwnd, const overlay::AlphaSurface& frame) {
+    SIZE size{frame.width,frame.height};
+    POINT origin{};
+    BLENDFUNCTION blend{AC_SRC_OVER,0,static_cast<BYTE>(ClampInt(gConfig.opacityPercent,20,100)*255/100),AC_SRC_ALPHA};
+    return UpdateLayeredWindow(hwnd,nullptr,nullptr,&size,frame.dc,&origin,0,&blend,ULW_ALPHA) != FALSE;
+}
+
+void PaintOverlay(HWND hwnd) {
+    PAINTSTRUCT ps{};
+    BeginPaint(hwnd, &ps);
+    RECT client{}; GetClientRect(hwnd, &client);
+    overlay::AlphaSurface frame(client.right, client.bottom);
+    if (!RenderOverlay(frame, NowMs())) {
+        SetStatus(L"오버레이를 그릴 메모리가 부족해요. 크기를 줄여 다시 적용해 주세요.");
+    } else if (!PresentOverlay(hwnd, frame)) {
+        SetStatus(L"오버레이 표시 실패 (Windows 오류 " + std::to_wstring(GetLastError()) + L"). 설정에서 다시 적용해 주세요.");
+    }
     EndPaint(hwnd, &ps);
 }
 
 LRESULT CALLBACK OverlayProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
+    case WM_CLOSE:
+        RequestApplicationClose();
+        return 0;
+    case WM_DESTROY:
+        KillTimer(hwnd, TIMER_RENDER);
+        gOverlayMoving = false;
+        if (gOverlayWnd == hwnd) gOverlayWnd = nullptr;
+        if (gAppRunning && !gShuttingDown) ShutdownApplication();
+        return 0;
     case WM_CREATE:
         SetTimer(hwnd, TIMER_RENDER, 8, nullptr);
         return 0;
@@ -1226,41 +2069,197 @@ LRESULT CALLBACK OverlayProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         PaintOverlay(hwnd);
         return 0;
     case WM_NCHITTEST:
-        if (gConfig.clickThrough) {
-            return HTTRANSPARENT;
-        }
+        return gMoveMode || (!gConfig.gameOverlay && !gConfig.clickThrough) ? HTCAPTION : HTTRANSPARENT;
+    case WM_MOUSEACTIVATE:
+        return MA_NOACTIVATE;
+    case WM_ENTERSIZEMOVE:
+        gOverlayMoving = (gMoveMode || (!gConfig.gameOverlay && !gConfig.clickThrough)) && GetWindowRect(hwnd, &gMoveStart);
+        return 0;
+    case WM_EXITSIZEMOVE:
+        FinishOverlayMove(hwnd);
+        return 0;
+    case WM_NCLBUTTONDBLCLK:
+        if (wParam == HTCAPTION) return 0; // Dragging must not maximize the OBS surface.
+        break;
+    case WM_SETCURSOR:
+        if (LOWORD(lParam) == HTCAPTION) { SetCursor(LoadCursorW(nullptr, IDC_SIZEALL)); return TRUE; }
         break;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-HWND MakeLabel(HWND parent, const wchar_t* text, int x, int y, int w, int h) {
-    HWND hwnd = CreateWindowW(L"STATIC", text, WS_CHILD | WS_VISIBLE, x, y, w, h, parent, nullptr, gInstance, nullptr);
+HWND TrackControl(HWND hwnd) {
     SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(gGuiFont), TRUE);
+    if (gBuildingPage >= 0) gPageControls[static_cast<size_t>(gBuildingPage)].push_back(hwnd);
     return hwnd;
+}
+
+HWND MakeLabel(HWND parent, const wchar_t* text, int x, int y, int w, int h, int id = 0) {
+    return TrackControl(CreateWindowW(L"STATIC", text, WS_CHILD | WS_VISIBLE,
+        x, y, w, h, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), gInstance, nullptr));
 }
 
 HWND MakeEdit(HWND parent, int id, const std::wstring& text, int x, int y, int w, int h) {
-    HWND hwnd = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", text.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                               x, y, w, h, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), gInstance, nullptr);
-    SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(gGuiFont), TRUE);
-    return hwnd;
+    return TrackControl(CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", text.c_str(),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+        x, y, w, h, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), gInstance, nullptr));
 }
 
 HWND MakeButton(HWND parent, int id, const wchar_t* text, int x, int y, int w, int h, DWORD style = BS_PUSHBUTTON) {
-    HWND hwnd = CreateWindowW(L"BUTTON", text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | style,
-                              x, y, w, h, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), gInstance, nullptr);
-    SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(gGuiFont), TRUE);
-    return hwnd;
+    return TrackControl(CreateWindowW(L"BUTTON", text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | style,
+        x, y, w, h, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), gInstance, nullptr));
 }
 
 void SetEditInt(HWND parent, int id, int value) {
-    wchar_t buffer[32]{};
-    wsprintfW(buffer, L"%d", value);
-    SetWindowTextW(GetDlgItem(parent, id), buffer);
+    SetWindowTextW(GetDlgItem(parent, id), std::to_wstring(value).c_str());
+}
+
+std::wstring DetectModeForLanes(const std::wstring& lanesText) {
+    std::vector<std::wstring> tokens;
+    std::wstring error;
+    if (!ValidateLaneText(lanesText, tokens, error)) return L"CUSTOM";
+    const int index = PresetIndexForCount(tokens.size());
+    return index >= 0 ? kPresets[index].mode : L"CUSTOM";
+}
+
+void UpdateDirtyState() {
+    const wchar_t* state = gUnapplied ? L"● 편집 중 · 아직 적용하지 않았어요" :
+        (gUnsaved ? L"● 적용됨 · 저장하면 다음 실행에도 유지돼요" : L"저장 상태와 같아요");
+    SetWindowTextW(GetDlgItem(gSettingsWnd, IDC_DIRTY), state);
+    SetWindowTextW(gSettingsWnd, (gUnapplied || gUnsaved) ?
+        L"Key Note Overlay C++ Settings *" : L"Key Note Overlay C++ Settings");
+}
+
+void MarkEdited() {
+    if (gFillingControls) return;
+    gUnapplied = true;
+    UpdateDirtyState();
+}
+
+void ShowSettingsPage(int page) {
+    gCurrentPage = ClampInt(page, 0, static_cast<int>(gPageControls.size()) - 1);
+    TabCtrl_SetCurSel(GetDlgItem(gSettingsWnd, IDC_TABS), gCurrentPage);
+    for (size_t i = 0; i < gPageControls.size(); ++i) {
+        for (HWND control : gPageControls[i]) ShowWindow(control, static_cast<int>(i) == gCurrentPage ? SW_SHOW : SW_HIDE);
+    }
+    InvalidateRect(gSettingsWnd, nullptr, TRUE);
+}
+
+void FillKeyStyleFields() {
+    if (gStyleVk >= gDraftKeyStyles.size()) gStyleVk = 0;
+    const bool filling = gFillingControls;
+    gFillingControls = true;
+    for (int id : {IDC_KEY_COLOR, IDC_KEY_OPACITY, IDC_PICK_COLOR, IDC_RESET_KEY_STYLE})
+        EnableWindow(GetDlgItem(gSettingsWnd, id), gStyleVk != 0);
+    SetWindowTextW(GetDlgItem(gSettingsWnd, IDC_STYLE_NAME), (gStyleVk ? TokenFromVk(gStyleVk) + L" 키" : L"키 배치를 먼저 지정해 주세요.").c_str());
+    SetWindowTextW(GetDlgItem(gSettingsWnd, IDC_KEY_COLOR), gStyleVk ? gDraftKeyStyles[gStyleVk].color.c_str() : L"");
+    SetWindowTextW(GetDlgItem(gSettingsWnd, IDC_KEY_OPACITY), gStyleVk ? gDraftKeyStyles[gStyleVk].opacity.c_str() : L"");
+    InvalidateRect(GetDlgItem(gSettingsWnd, IDC_STYLE_PREVIEW), nullptr, TRUE);
+    gFillingControls = filling;
+}
+
+void RefreshKeyStyleList() {
+    HWND list = GetDlgItem(gSettingsWnd, IDC_STYLE_KEYS);
+    SendMessageW(list, LB_RESETCONTENT, 0, 0);
+    std::vector<std::wstring> tokens;
+    std::wstring error;
+    int selection = 0;
+    if (ValidateLaneText(WindowText(GetDlgItem(gSettingsWnd, IDC_LANES)), tokens, error)) {
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            UINT vk = 0; std::wstring label;
+            TokenToVk(tokens[i], vk, label);
+            const std::wstring text = std::to_wstring(i + 1) + L"    " + tokens[i];
+            const LRESULT row = SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text.c_str()));
+            SendMessageW(list, LB_SETITEMDATA, row, vk);
+            if (vk == gStyleVk) selection = static_cast<int>(row);
+        }
+    }
+    const int count = static_cast<int>(SendMessageW(list, LB_GETCOUNT, 0, 0));
+    SendMessageW(list, LB_SETCURSEL, count <= 0 ? -1 : selection, 0);
+    gStyleVk = count <= 0 ? 0 : static_cast<UINT>(SendMessageW(list, LB_GETITEMDATA, selection, 0));
+    FillKeyStyleFields();
+}
+
+void DrawStylePreview(HDC dc, RECT rect) {
+    COLORREF color = CLR_INVALID;
+    int opacity = 100;
+    if (gStyleVk) {
+        ParseColor(gDraftKeyStyles[gStyleVk].color, color);
+        ParseInteger(gDraftKeyStyles[gStyleVk].opacity, 0, 100, opacity);
+    }
+    const int lane = static_cast<int>(SendDlgItemMessageW(gSettingsWnd, IDC_STYLE_KEYS, LB_GETCURSEL, 0, 0));
+    if (color == CLR_INVALID) color = kPalette[static_cast<size_t>(std::max(0, lane)) % kPalette.size()];
+    for (int y = rect.top; y < rect.bottom; y += 12) for (int x = rect.left; x < rect.right; x += 12) {
+        COLORREF bg = ((x-rect.left)/12 + (y-rect.top)/12) % 2 ? RGB(218,218,218) : RGB(255,255,255);
+        RECT cell{x,y,std::min(x+12,static_cast<int>(rect.right)),std::min(y+12,static_cast<int>(rect.bottom))};
+        HBRUSH brush = CreateSolidBrush(bg); FillRect(dc, &cell, brush); DeleteObject(brush);
+        RECT body{rect.left+20,rect.top+12,rect.right-20,rect.bottom-12}, covered{};
+        if (IntersectRect(&covered, &cell, &body)) {
+            brush = CreateSolidBrush(BlendColor(color, bg, opacity * 255 / 100));
+            FillRect(dc, &covered, brush); DeleteObject(brush);
+        }
+    }
+}
+
+void PickKeyColor() {
+    if (!gStyleVk) return;
+    static COLORREF custom[16]{};
+    COLORREF color = CLR_INVALID;
+    ParseColor(gDraftKeyStyles[gStyleVk].color, color);
+    const int lane = static_cast<int>(SendDlgItemMessageW(gSettingsWnd, IDC_STYLE_KEYS, LB_GETCURSEL, 0, 0));
+    CHOOSECOLORW choice{};
+    choice.lStructSize = sizeof(choice); choice.hwndOwner = gSettingsWnd;
+    choice.rgbResult = color == CLR_INVALID ? kPalette[static_cast<size_t>(std::max(0,lane)) % kPalette.size()] : color;
+    choice.lpCustColors = custom; choice.Flags = CC_FULLOPEN | CC_RGBINIT;
+    gPickingColor = true;
+    const BOOL accepted = ChooseColorW(&choice);
+    gPickingColor = false;
+    if (accepted) SetWindowTextW(GetDlgItem(gSettingsWnd, IDC_KEY_COLOR), ColorHex(choice.rgbResult).c_str());
+}
+
+void RefreshLaneEditor() {
+    HWND list = GetDlgItem(gSettingsWnd, IDC_LANE_LIST);
+    int selected = static_cast<int>(SendMessageW(list, LB_GETCURSEL, 0, 0));
+    SendMessageW(list, LB_RESETCONTENT, 0, 0);
+    std::vector<std::wstring> tokens;
+    std::wstring error;
+    const bool valid = ValidateLaneText(WindowText(GetDlgItem(gSettingsWnd, IDC_LANES)), tokens, error);
+    if (valid) {
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            std::wstring label = std::to_wstring(i + 1) + L"    " + tokens[i];
+            SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+        }
+        SendMessageW(list, LB_SETCURSEL, static_cast<WPARAM>(ClampInt(selected, 0, static_cast<int>(tokens.size()) - 1)), 0);
+    }
+    const std::wstring summary = valid ? std::to_wstring(tokens.size()) + L"개 키 · 목록 위에서 아래가 화면의 왼쪽에서 오른쪽 순서예요." : error;
+    SetWindowTextW(GetDlgItem(gSettingsWnd, IDC_LANE_SUMMARY), summary.c_str());
+    HWND combo = GetDlgItem(gSettingsWnd, IDC_PRESET);
+    int match = 0;
+    const std::wstring mode = valid ? DetectModeForLanes(JoinLaneTokens(tokens)) : L"CUSTOM";
+    for (int i = 1; i <= static_cast<int>(kPresets.size()); ++i) {
+        int index = static_cast<int>(SendMessageW(combo, CB_GETITEMDATA, i, 0));
+        if (index >= 0 && index < static_cast<int>(kPresets.size()) && mode == kPresets[static_cast<size_t>(index)].mode) match = i;
+    }
+    SendMessageW(combo, CB_SETCURSEL, match, 0);
+    RefreshKeyStyleList();
+}
+
+void FillAppearance(const Config& config) {
+    SetEditInt(gSettingsWnd, IDC_OPACITY, config.opacityPercent);
+    SetEditInt(gSettingsWnd, IDC_LANE_SPACING, config.laneSpacingPercent);
+    SetEditInt(gSettingsWnd, IDC_LONG_ALPHA, config.longNoteAlpha);
+    const std::pair<int, bool> checks[] = {{IDC_CIRCLE_NOTES, config.circleNotes}, {IDC_LANE_BG, config.laneBackground},
+        {IDC_ROUNDED_BOXES, config.roundedBoxes}, {IDC_THIN_OUTLINE, config.thinOutline}, {IDC_KEY_TEXT_BOTTOM, config.keyTextBottom}};
+    for (const auto& check : checks) SendMessageW(GetDlgItem(gSettingsWnd, check.first), BM_SETCHECK, check.second ? BST_CHECKED : BST_UNCHECKED, 0);
+    gDraftVisualPreset = config.visualPreset;
+    SetWindowTextW(GetDlgItem(gSettingsWnd, IDC_VISUAL_NAME), (L"테마: " + gDraftVisualPreset).c_str());
 }
 
 void FillSettingsControls(HWND hwnd) {
+    gFillingControls = true;
+    gDraftPresetLanes = gConfig.presetLanes;
+    for (UINT vk = 0; vk < gDraftKeyStyles.size(); ++vk)
+        gDraftKeyStyles[vk] = {ColorHex(gConfig.keyStyles[vk].color), std::to_wstring(gConfig.keyStyles[vk].opacity)};
     SetWindowTextW(GetDlgItem(hwnd, IDC_LANES), gConfig.lanesText.c_str());
     SetEditInt(hwnd, IDC_X, gConfig.x);
     SetEditInt(hwnd, IDC_Y, gConfig.y);
@@ -1270,208 +2269,651 @@ void FillSettingsControls(HWND hwnd) {
     SetEditInt(hwnd, IDC_TRAVEL, gConfig.travelPx);
     SetEditInt(hwnd, IDC_NOTE_WIDTH, gConfig.noteWidth);
     SetEditInt(hwnd, IDC_NOTE_HEIGHT, gConfig.noteHeight);
-    SetEditInt(hwnd, IDC_LANE_SPACING, gConfig.laneSpacingPercent);
-    SetEditInt(hwnd, IDC_OPACITY, gConfig.opacityPercent);
+    FillAppearance(gConfig);
     SendMessageW(GetDlgItem(hwnd, IDC_DEBUG_BG), BM_SETCHECK, gConfig.debugBackground ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(GetDlgItem(hwnd, IDC_CLICK_THROUGH), BM_SETCHECK, gConfig.clickThrough ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(GetDlgItem(hwnd, IDC_TOPMOST), BM_SETCHECK, gConfig.alwaysOnTop ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageW(GetDlgItem(hwnd, IDC_CIRCLE_NOTES), BM_SETCHECK, gConfig.circleNotes ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageW(GetDlgItem(hwnd, IDC_LANE_BG), BM_SETCHECK, gConfig.laneBackground ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageW(GetDlgItem(hwnd, IDC_ROUNDED_BOXES), BM_SETCHECK, gConfig.roundedBoxes ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageW(GetDlgItem(hwnd, IDC_THIN_OUTLINE), BM_SETCHECK, gConfig.thinOutline ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageW(GetDlgItem(hwnd, IDC_KEY_TEXT_BOTTOM), BM_SETCHECK, gConfig.keyTextBottom ? BST_CHECKED : BST_UNCHECKED, 0);
-    RefreshKeyMapStatus();
+    SendMessageW(GetDlgItem(hwnd, IDC_DIFFICULTY_ENABLED), BM_SETCHECK, gConfig.difficultyEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(GetDlgItem(hwnd, IDC_DIFFICULTY_HUD), BM_SETCHECK, gConfig.difficultyHud ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(GetDlgItem(hwnd, IDC_REPORT_AUTO), BM_SETCHECK, gConfig.reportAutoSave ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(GetDlgItem(hwnd, IDC_GAME_OVERLAY), BM_SETCHECK, gConfig.gameOverlay ? BST_CHECKED : BST_UNCHECKED, 0);
+    RefreshLaneEditor();
+    gFillingControls = false;
+    UpdateDirtyState();
 }
 
-std::wstring DetectModeForLanes(const std::wstring& lanesText) {
-    std::wstring normalized = Upper(lanesText);
-    normalized.erase(std::remove_if(normalized.begin(), normalized.end(), [](wchar_t c) {
-        return std::iswspace(c) != 0;
-    }), normalized.end());
-    for (const Preset& preset : kPresets) {
-        std::wstring presetText = Upper(preset.lanes);
-        presetText.erase(std::remove_if(presetText.begin(), presetText.end(), [](wchar_t c) {
-            return std::iswspace(c) != 0;
-        }), presetText.end());
-        if (normalized == presetText) {
-            return preset.mode;
+void SettingsError(int id, int page, const std::wstring& error) {
+    ShowSettingsPage(page);
+    SetStatus(error);
+    SetFocus(GetDlgItem(gSettingsWnd, id));
+    SendMessageW(GetDlgItem(gSettingsWnd, id), EM_SETSEL, 0, -1);
+}
+
+bool BuildSettingsCandidate(Config& candidate, bool reportErrors) {
+    // Validate the entire draft before touching the active configuration or key map.
+    candidate = gConfig;
+    std::vector<std::wstring> tokens;
+    std::wstring error;
+    if (!ValidateLaneText(WindowText(GetDlgItem(gSettingsWnd, IDC_LANES)), tokens, error)) {
+        if (reportErrors) SettingsError(IDC_LANES, 0, error);
+        return false;
+    }
+    candidate.lanesText = JoinLaneTokens(tokens);
+    candidate.mode = DetectModeForLanes(candidate.lanesText);
+    candidate.presetLanes = gDraftPresetLanes;
+    RememberPreset(candidate.presetLanes, candidate.lanesText);
+    for (UINT vk = 0; vk < gDraftKeyStyles.size(); ++vk) {
+        const auto& draft = gDraftKeyStyles[vk];
+        auto& style = candidate.keyStyles[vk];
+        const bool colorOk = ParseColor(draft.color, style.color);
+        if (!colorOk || !ParseInteger(draft.opacity, 0, 100, style.opacity)) {
+            if (reportErrors) {
+                // Keep even an inactive key's invalid draft instead of losing it
+                // when the user switches presets or moves to another key.
+                gStyleVk = vk;
+                HWND list = GetDlgItem(gSettingsWnd, IDC_STYLE_KEYS);
+                int selected = -1;
+                const int count = static_cast<int>(SendMessageW(list, LB_GETCOUNT, 0, 0));
+                for (int i=0; i<count; ++i) if (static_cast<UINT>(SendMessageW(list, LB_GETITEMDATA, i, 0)) == vk) selected = i;
+                SendMessageW(list, LB_SETCURSEL, selected, 0);
+                FillKeyStyleFields();
+                SettingsError(colorOk ? IDC_KEY_OPACITY : IDC_KEY_COLOR, 4, TokenFromVk(vk) +
+                    (colorOk ? L": 불투명도는 0~100 정수로 입력해 주세요." : L": 색은 #RRGGBB 형식 또는 빈칸(기본색)으로 입력해 주세요."));
+            }
+            return false;
         }
     }
-    return L"CUSTOM";
+    struct Field { int id; int page; const wchar_t* name; int min; int max; int* value; };
+    const Field fields[] = {
+        {IDC_X, 1, L"X 위치", -32000, 32000, &candidate.x}, {IDC_Y, 1, L"Y 위치", -32000, 32000, &candidate.y},
+        {IDC_WIDTH, 1, L"가로 크기", 240, 10000, &candidate.width}, {IDC_HEIGHT, 1, L"세로 크기", 90, 4000, &candidate.height},
+        {IDC_DURATION, 2, L"사라지는 시간", 120, 5000, &candidate.durationMs}, {IDC_TRAVEL, 2, L"이동 거리", 40, 4000, &candidate.travelPx},
+        {IDC_NOTE_WIDTH, 2, L"노트 너비", 24, 220, &candidate.noteWidth}, {IDC_NOTE_HEIGHT, 2, L"노트 높이", 18, 140, &candidate.noteHeight},
+        {IDC_LANE_SPACING, 2, L"레인 간격", 50, 160, &candidate.laneSpacingPercent},
+        {IDC_OPACITY, 2, L"전체 불투명도", 20, 100, &candidate.opacityPercent},
+        {IDC_LONG_ALPHA, 2, L"롱노트 진하기", 32, 180, &candidate.longNoteAlpha}};
+    for (const auto& field : fields) {
+        if (!ParseInteger(WindowText(GetDlgItem(gSettingsWnd, field.id)), field.min, field.max, *field.value)) {
+            if (reportErrors) SettingsError(field.id, field.page, std::wstring(field.name) + L": " + std::to_wstring(field.min) + L"~" +
+                std::to_wstring(field.max) + L" 범위의 정수를 입력해 주세요.");
+            return false;
+        }
+    }
+    const std::pair<int, bool*> checks[] = {{IDC_DEBUG_BG, &candidate.debugBackground}, {IDC_CLICK_THROUGH, &candidate.clickThrough},
+        {IDC_TOPMOST, &candidate.alwaysOnTop}, {IDC_CIRCLE_NOTES, &candidate.circleNotes}, {IDC_LANE_BG, &candidate.laneBackground},
+        {IDC_ROUNDED_BOXES, &candidate.roundedBoxes}, {IDC_THIN_OUTLINE, &candidate.thinOutline}, {IDC_KEY_TEXT_BOTTOM, &candidate.keyTextBottom},
+        {IDC_DIFFICULTY_ENABLED, &candidate.difficultyEnabled}, {IDC_DIFFICULTY_HUD, &candidate.difficultyHud},
+        {IDC_REPORT_AUTO, &candidate.reportAutoSave}, {IDC_GAME_OVERLAY, &candidate.gameOverlay}};
+    for (const auto& check : checks) *check.second = SendMessageW(GetDlgItem(gSettingsWnd, check.first), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    candidate.visualPreset = gDraftVisualPreset;
+    return true;
 }
 
 bool ReadSettingsControls() {
-    gConfig.lanesText = WindowText(GetDlgItem(gSettingsWnd, IDC_LANES));
-    gConfig.mode = DetectModeForLanes(gConfig.lanesText);
-    gConfig.x = WindowInt(GetDlgItem(gSettingsWnd, IDC_X), gConfig.x, -32000, 32000);
-    gConfig.y = WindowInt(GetDlgItem(gSettingsWnd, IDC_Y), gConfig.y, -32000, 32000);
-    gConfig.width = WindowInt(GetDlgItem(gSettingsWnd, IDC_WIDTH), gConfig.width, 240, 10000);
-    gConfig.height = WindowInt(GetDlgItem(gSettingsWnd, IDC_HEIGHT), gConfig.height, 90, 4000);
-    gConfig.durationMs = WindowInt(GetDlgItem(gSettingsWnd, IDC_DURATION), gConfig.durationMs, 120, 5000);
-    gConfig.travelPx = WindowInt(GetDlgItem(gSettingsWnd, IDC_TRAVEL), gConfig.travelPx, 40, 4000);
-    gConfig.noteWidth = WindowInt(GetDlgItem(gSettingsWnd, IDC_NOTE_WIDTH), gConfig.noteWidth, 24, 220);
-    gConfig.noteHeight = WindowInt(GetDlgItem(gSettingsWnd, IDC_NOTE_HEIGHT), gConfig.noteHeight, 18, 140);
-    gConfig.laneSpacingPercent = WindowInt(GetDlgItem(gSettingsWnd, IDC_LANE_SPACING), gConfig.laneSpacingPercent, 50, 160);
-    gConfig.opacityPercent = WindowInt(GetDlgItem(gSettingsWnd, IDC_OPACITY), gConfig.opacityPercent, 20, 100);
-    gConfig.debugBackground = SendMessageW(GetDlgItem(gSettingsWnd, IDC_DEBUG_BG), BM_GETCHECK, 0, 0) == BST_CHECKED;
-    gConfig.clickThrough = SendMessageW(GetDlgItem(gSettingsWnd, IDC_CLICK_THROUGH), BM_GETCHECK, 0, 0) == BST_CHECKED;
-    gConfig.alwaysOnTop = SendMessageW(GetDlgItem(gSettingsWnd, IDC_TOPMOST), BM_GETCHECK, 0, 0) == BST_CHECKED;
-    gConfig.circleNotes = SendMessageW(GetDlgItem(gSettingsWnd, IDC_CIRCLE_NOTES), BM_GETCHECK, 0, 0) == BST_CHECKED;
-    gConfig.laneBackground = SendMessageW(GetDlgItem(gSettingsWnd, IDC_LANE_BG), BM_GETCHECK, 0, 0) == BST_CHECKED;
-    gConfig.roundedBoxes = SendMessageW(GetDlgItem(gSettingsWnd, IDC_ROUNDED_BOXES), BM_GETCHECK, 0, 0) == BST_CHECKED;
-    gConfig.thinOutline = SendMessageW(GetDlgItem(gSettingsWnd, IDC_THIN_OUTLINE), BM_GETCHECK, 0, 0) == BST_CHECKED;
-    gConfig.keyTextBottom = SendMessageW(GetDlgItem(gSettingsWnd, IDC_KEY_TEXT_BOTTOM), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    Config candidate;
+    if (!BuildSettingsCandidate(candidate, true)) return false;
+    const bool resetDifficulty = candidate.lanesText != gConfig.lanesText || candidate.difficultyEnabled != gConfig.difficultyEnabled ||
+        candidate.reportAutoSave != gConfig.reportAutoSave || candidate.gameOverlay != gConfig.gameOverlay;
+    if (resetDifficulty) FinishSessionReport("분석 / 저장 설정 변경", NowMs());
+    gConfig = candidate;
     RebuildLaneConfig();
-    gConfig.lanesText = CanonicalLaneText();
-    SetWindowTextW(GetDlgItem(gSettingsWnd, IDC_LANES), gConfig.lanesText.c_str());
-    gConfig.mode = DetectModeForLanes(gConfig.lanesText);
     ResetInputRuntimeState();
-    RefreshKeyMapStatus();
-    ApplyOverlayWindowStyle();
-    return !gConfig.lanes.empty();
-}
-
-void ApplyPreset(const wchar_t* mode, const wchar_t* lanes) {
-    gConfig.mode = mode;
-    gConfig.lanesText = lanes;
-    SetWindowTextW(GetDlgItem(gSettingsWnd, IDC_LANES), gConfig.lanesText.c_str());
-    RebuildLaneConfig();
-    gConfig.lanesText = CanonicalLaneText();
-    SetWindowTextW(GetDlgItem(gSettingsWnd, IDC_LANES), gConfig.lanesText.c_str());
-    ResetInputRuntimeState();
-    RefreshKeyMapStatus();
-    InvalidateRect(gOverlayWnd, nullptr, FALSE);
-}
-
-void ApplyVisualPresetButton(const wchar_t* preset) {
-    ApplyVisualPreset(preset);
+    if (resetDifficulty) ResetDifficulty(static_cast<int>(gConfig.lanes.size()));
+    RefreshDifficultyDisplay();
+    gUnapplied = false;
+    gUnsaved = !SameConfig(gConfig, gSavedConfig);
     FillSettingsControls(gSettingsWnd);
-    ApplyOverlayWindowStyle();
-    InvalidateRect(gOverlayWnd, nullptr, FALSE);
+    if (!gUiSelfTest) ApplyOverlayWindowStyle();
+    SetStatus(L"오버레이에 적용했어요. 저장하면 다음 실행에도 유지됩니다.");
+    return true;
+}
+
+bool SaveSettings() {
+    if (!ReadSettingsControls()) return false;
+    if (!SaveConfig()) {
+        gUnsaved = true;
+        UpdateDirtyState();
+        SetStatus(L"저장 실패 (Windows 오류 " + std::to_wstring(gConfigSaveError) + L"). 폴더 권한과 파일 사용 여부를 확인해 주세요.\n" + gConfigPath);
+        return false;
+    }
+    gSavedConfig = gConfig;
+    gUnsaved = false;
+    UpdateDirtyState();
+    SetStatus(gIniSaveFailed ? L"설정 저장 완료. 호환 INI 갱신은 실패했지만 다음 실행에 JSON으로 복원됩니다.\n" + gConfigPath :
+        L"저장 완료 · 다음 실행에도 유지됩니다.\n" + gConfigPath);
+    return true;
+}
+
+bool SaveOverlayPosition(int x, int y) {
+    gConfig.x = x;
+    gConfig.y = y;
+    // Save only coordinates over the last committed snapshot. Other applied or
+    // invalid draft edits must not be silently committed by a mouse gesture.
+    const Config active = gConfig;
+    gConfig = gSavedConfig;
+    gConfig.x = x;
+    gConfig.y = y;
+    const bool saved = SaveConfig();
+    if (saved) { gSavedConfig.x = x; gSavedConfig.y = y; }
+    gConfig = active;
+    RebuildLaneConfig(); // SaveConfig rebuilds the global map for its temporary snapshot.
+    gFillingControls = true;
+    SetEditInt(gSettingsWnd, IDC_X, x);
+    SetEditInt(gSettingsWnd, IDC_Y, y);
+    gFillingControls = false;
+    Config draft;
+    gUnapplied = !BuildSettingsCandidate(draft, false) || !SameConfig(draft, gConfig);
+    gUnsaved = !SameConfig(gConfig, gSavedConfig);
+    UpdateDirtyState();
+    if (!saved) SetStatus(L"위치 저장 실패 (Windows 오류 " + std::to_wstring(gConfigSaveError) +
+        L"). 이전 저장 위치는 유지됩니다. [위치 저장]으로 다시 시도해 주세요.");
+    else SetStatus(gIniSaveFailed ? L"위치 저장 완료. 호환 INI 갱신은 실패했지만 JSON으로 복원됩니다." :
+        L"위치 저장 완료 · 다음 실행에도 복원됩니다. 다른 편집 내용은 그대로 유지했어요.");
+    return saved;
+}
+
+void FinishOverlayMove(HWND hwnd) {
+    if (!gOverlayMoving) return;
+    gOverlayMoving = false;
+    RECT position{};
+    // Native move cancellation returns to the starting rectangle. Programmatic
+    // movement never enters this path; neither should write a configuration.
+    if (GetWindowRect(hwnd, &position) && (position.left != gMoveStart.left || position.top != gMoveStart.top))
+        SaveOverlayPosition(position.left, position.top);
+}
+
+bool SavePositionDraft() {
+    int x = 0, y = 0;
+    if (!ParseInteger(WindowText(GetDlgItem(gSettingsWnd, IDC_X)), -32000, 32000, x)) {
+        SettingsError(IDC_X, 1, L"X 위치: -32000~32000 범위의 정수를 입력해 주세요."); return false;
+    }
+    if (!ParseInteger(WindowText(GetDlgItem(gSettingsWnd, IDC_Y)), -32000, 32000, y)) {
+        SettingsError(IDC_Y, 1, L"Y 위치: -32000~32000 범위의 정수를 입력해 주세요."); return false;
+    }
+    if (gOverlayWnd && !SetWindowPos(gOverlayWnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)) {
+        SetStatus(L"창 위치를 바꾸지 못했어요. 위치를 저장하지 않았습니다."); return false;
+    }
+    return SaveOverlayPosition(x, y);
+}
+
+void SetLaneTokens(const std::vector<std::wstring>& tokens, int selected) {
+    SetWindowTextW(GetDlgItem(gSettingsWnd, IDC_LANES), JoinLaneTokens(tokens).c_str());
+    SendMessageW(GetDlgItem(gSettingsWnd, IDC_LANE_LIST), LB_SETCURSEL, selected, 0);
+}
+
+void EditSelectedLane(int command) {
+    std::vector<std::wstring> tokens;
+    std::wstring error;
+    if (!ValidateLaneText(WindowText(GetDlgItem(gSettingsWnd, IDC_LANES)), tokens, error)) { SetStatus(error); return; }
+    int selected = static_cast<int>(SendMessageW(GetDlgItem(gSettingsWnd, IDC_LANE_LIST), LB_GETCURSEL, 0, 0));
+    if (selected < 0 || selected >= static_cast<int>(tokens.size())) { SetStatus(L"목록에서 바꿀 키를 선택해 주세요."); return; }
+    if (command == IDC_REMOVE) {
+        if (tokens.size() == 1) { SetStatus(L"키는 최소 1개가 필요해요."); return; }
+        tokens.erase(tokens.begin() + selected);
+        selected = std::min(selected, static_cast<int>(tokens.size()) - 1);
+    } else {
+        int next = selected + (command == IDC_MOVE_LEFT ? -1 : 1);
+        if (next < 0 || next >= static_cast<int>(tokens.size())) return;
+        std::swap(tokens[static_cast<size_t>(selected)], tokens[static_cast<size_t>(next)]);
+        selected = next;
+    }
+    SetLaneTokens(tokens, selected);
+    SetStatus(L"키 배치를 편집했어요. 적용 또는 저장을 눌러 주세요.");
+}
+
+void SetCaptureControls(bool enabled) {
+    for (const auto& page : gPageControls) for (HWND control : page) EnableWindow(control, enabled);
+    for (int id : {IDC_APPLY, IDC_SAVE, IDC_TEST, IDC_REVERT, IDC_TABS}) EnableWindow(GetDlgItem(gSettingsWnd, id), enabled);
+    EnableWindow(GetDlgItem(gSettingsWnd, IDC_RECORD), TRUE);
+}
+
+void EndKeyCapture(bool cancel) {
+    if (gCaptureMode == CaptureMode::None) return;
+    if (cancel) {
+        SetWindowTextW(GetDlgItem(gSettingsWnd, IDC_LANES), gCaptureOriginal.c_str());
+        gUnapplied = gCaptureWasUnapplied;
+    }
+    gCaptureMode = CaptureMode::None;
+    gCapturedKeys.clear();
+    SetCaptureControls(true);
+    SetWindowTextW(GetDlgItem(gSettingsWnd, IDC_RECORD), L"순서대로 등록");
+    ResetInputRuntimeState();
+    RefreshDifficultyDisplay();
+    UpdateDirtyState();
+    SetStatus(cancel ? L"키 등록을 취소하고 이전 배치로 돌아왔어요." : L"키 등록 완료. 적용 또는 저장을 눌러 주세요.");
+}
+
+void BeginKeyCapture(CaptureMode mode) {
+    if (gCaptureMode != CaptureMode::None) { EndKeyCapture(false); return; }
+    gCaptureIndex = static_cast<int>(SendMessageW(GetDlgItem(gSettingsWnd, IDC_LANE_LIST), LB_GETCURSEL, 0, 0));
+    gCaptureOriginal = WindowText(GetDlgItem(gSettingsWnd, IDC_LANES));
+    gCapturedKeys.clear();
+    std::wstring error;
+    if (mode == CaptureMode::Replace && (!ValidateLaneText(gCaptureOriginal, gCapturedKeys, error) ||
+        gCaptureIndex < 0 || gCaptureIndex >= static_cast<int>(gCapturedKeys.size()))) {
+        SetStatus(L"유효한 키 배치에서 변경할 키를 선택해 주세요.");
+        return;
+    }
+    gCaptureWasUnapplied = gUnapplied;
+    ResetDifficulty(static_cast<int>(gConfig.lanes.size()));
+    gCaptureMode = mode;
+    RefreshDifficultyDisplay();
+    SetCaptureControls(false);
+    SetWindowTextW(GetDlgItem(gSettingsWnd, IDC_RECORD), L"등록 완료");
+    SetFocus(GetDlgItem(gSettingsWnd, IDC_RECORD));
+    ResetInputRuntimeState();
+    SetStatus(mode == CaptureMode::Sequence ? L"왼쪽부터 키를 하나씩 누르세요. [등록 완료]로 마침 · Esc로 취소" : L"새 키를 누르세요. Esc로 취소할 수 있어요.");
+}
+
+void CaptureKey(UINT vk) {
+    if (gCaptureMode == CaptureMode::None) return;
+    if (vk == VK_ESCAPE) { EndKeyCapture(true); return; }
+    auto token = TokenFromVk(vk);
+    if (token.empty()) { SetStatus(L"이 키는 등록할 수 없어요. 다른 키를 눌러 주세요."); return; }
+    auto candidate = gCapturedKeys;
+    if (gCaptureMode == CaptureMode::Replace) candidate[static_cast<size_t>(gCaptureIndex)] = token;
+    else candidate.push_back(token);
+    std::vector<std::wstring> validated;
+    std::wstring error;
+    if (!ValidateLaneText(JoinLaneTokens(candidate), validated, error)) { SetStatus(error); return; }
+    gCapturedKeys = validated;
+    SetLaneTokens(validated, gCaptureMode == CaptureMode::Replace ? gCaptureIndex : static_cast<int>(validated.size()) - 1);
+    if (gCaptureMode == CaptureMode::Replace) EndKeyCapture(false);
+    else SetStatus(std::to_wstring(validated.size()) + L"개 등록됨 · 다음 키를 누르거나 [등록 완료]를 누르세요. Esc로 취소");
+}
+
+UINT MessageVirtualKey(const MSG& msg) {
+    UINT vk = static_cast<UINT>(msg.wParam);
+    const bool extended = (msg.lParam & (1LL << 24)) != 0;
+    if (vk == VK_SHIFT) vk = MapVirtualKeyW((msg.lParam >> 16) & 0xff, MAPVK_VSC_TO_VK_EX);
+    if (vk == VK_CONTROL) vk = extended ? VK_RCONTROL : VK_LCONTROL;
+    if (vk == VK_MENU) vk = extended ? VK_RMENU : VK_LMENU;
+    return vk;
+}
+
+bool HandleCaptureMessage(const MSG& msg) {
+    if (gCaptureMode == CaptureMode::None || GetForegroundWindow() != gSettingsWnd) return false;
+    if (msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN && msg.message != WM_KEYUP && msg.message != WM_SYSKEYUP) return false;
+    if ((msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN) && !(msg.lParam & (1LL << 30))) {
+        CaptureKey(MessageVirtualKey(msg));
+    }
+    return true;
+}
+
+bool HandleDifficultyTestMessage(const MSG& msg) {
+    if (!gConfig.difficultyEnabled || gCurrentPage != 3 || GetForegroundWindow() != gSettingsWnd) return false;
+    if (msg.message != WM_KEYDOWN && msg.message != WM_KEYUP && msg.message != WM_SYSKEYDOWN && msg.message != WM_SYSKEYUP) return false;
+    const UINT vk = MessageVirtualKey(msg);
+    // The hook already recorded this press. In the analysis tab, playing a mapped
+    // Space/Enter/arrow key must not activate focused settings buttons or checkboxes.
+    return vk < gVkToLaneIndex.size() && gVkToLaneIndex[vk] >= 0;
 }
 
 void SpawnTestNotes() {
-    for (int i = 0; i < static_cast<int>(gConfig.lanes.size()); ++i) {
-        SpawnTapNote(i);
+    for (int i = 0; i < static_cast<int>(gConfig.lanes.size()); ++i) SpawnTapNote(i);
+}
+
+void CenterOverlayDraft() {
+    int width = 0, height = 0;
+    if (!ParseInteger(WindowText(GetDlgItem(gSettingsWnd, IDC_WIDTH)), 240, 10000, width) ||
+        !ParseInteger(WindowText(GetDlgItem(gSettingsWnd, IDC_HEIGHT)), 90, 4000, height)) {
+        SetStatus(L"먼저 유효한 가로·세로 크기를 입력해 주세요."); return;
     }
+    MONITORINFO info{sizeof(info), {}, {}, 0};
+    if (!GetMonitorInfoW(MonitorFromWindow(gSettingsWnd, MONITOR_DEFAULTTONEAREST), &info)) return;
+    SetEditInt(gSettingsWnd, IDC_X, info.rcWork.left + (info.rcWork.right - info.rcWork.left - width) / 2);
+    SetEditInt(gSettingsWnd, IDC_Y, info.rcWork.top + (info.rcWork.bottom - info.rcWork.top - height) / 2);
+    SetStatus(L"이 설정 창이 있는 모니터의 중앙 위치를 입력했어요. 적용을 눌러 주세요.");
+}
+
+HFONT CreateSettingsFont() {
+    HFONT font = CreateFontW(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Malgun Gothic");
+    return font ? font : reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+}
+
+void ShowSettingsWindow() {
+    if (gShuttingDown || !IsWindow(gSettingsWnd)) return;
+    ShowWindow(gSettingsWnd, IsIconic(gSettingsWnd) ? SW_RESTORE : SW_SHOW);
+    SetForegroundWindow(gSettingsWnd);
+}
+
+void ShutdownApplication() {
+    if (gShuttingDown) return;
+    gShuttingDown = true;
+    gAppRunning = false;
+    // Delete the shell icon while its callback HWND still exists. All normal
+    // exits, partial startup failures and message-loop exits share this path.
+    RemoveTrayIcon();
+    if (gKeyboardHook) {
+        UnhookWindowsHookEx(gKeyboardHook);
+        gKeyboardHook = nullptr;
+    }
+    FinishSessionReport("앱 종료 · 진행 중 기록", NowMs());
+    PollReportWrites(true);
+    gCaptureMode = CaptureMode::None;
+    if (IsWindow(gOverlayWnd)) DestroyWindow(gOverlayWnd);
+    if (IsWindow(gSettingsWnd)) DestroyWindow(gSettingsWnd);
+    gOverlayWnd = gSettingsWnd = nullptr;
+    PostQuitMessage(0);
+}
+
+void RequestApplicationClose() {
+    if (gShuttingDown || gCloseInProgress) return;
+    if (IsWindow(gSettingsWnd)) SendMessageW(gSettingsWnd, WM_CLOSE, 0, 0);
+    else ShutdownApplication();
+}
+
+void CleanupApplication() {
+    ShutdownApplication();
+    for (HFONT* font : {&gNoteFont, &gKeyFont, &gGuiFont}) {
+        if (*font) DeleteObject(*font);
+        *font = nullptr;
+    }
+    DestroyHudFonts();
 }
 
 LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    switch (msg) {
-    case WM_CREATE:
-        MakeLabel(hwnd, L"Lane keys", 18, 18, 110, 22);
-        MakeEdit(hwnd, IDC_LANES, L"", 130, 16, 360, 24);
-        MakeLabel(hwnd, L"Presets", 18, 52, 110, 22);
-        MakeButton(hwnd, IDC_PRESET_5, L"5K", 130, 48, 58, 28);
-        MakeButton(hwnd, IDC_PRESET_8, L"8K", 198, 48, 58, 28);
-        MakeButton(hwnd, IDC_PRESET_10, L"10K", 266, 48, 58, 28);
-        MakeLabel(hwnd, L"Position", 18, 92, 110, 22);
-        MakeLabel(hwnd, L"X", 130, 92, 18, 22);
-        MakeEdit(hwnd, IDC_X, L"", 150, 90, 70, 24);
-        MakeLabel(hwnd, L"Y", 232, 92, 18, 22);
-        MakeEdit(hwnd, IDC_Y, L"", 252, 90, 70, 24);
-        MakeLabel(hwnd, L"Size", 18, 128, 110, 22);
-        MakeLabel(hwnd, L"W", 130, 128, 22, 22);
-        MakeEdit(hwnd, IDC_WIDTH, L"", 154, 126, 70, 24);
-        MakeLabel(hwnd, L"H", 236, 128, 22, 22);
-        MakeEdit(hwnd, IDC_HEIGHT, L"", 260, 126, 70, 24);
-        MakeLabel(hwnd, L"Timing", 18, 164, 110, 22);
-        MakeLabel(hwnd, L"Release fade ms", 130, 164, 112, 22);
-        MakeEdit(hwnd, IDC_DURATION, L"", 246, 162, 70, 24);
-        MakeLabel(hwnd, L"Travel px", 330, 164, 70, 22);
-        MakeEdit(hwnd, IDC_TRAVEL, L"", 402, 162, 70, 24);
-
-        MakeLabel(hwnd, L"Geometry", 18, 202, 110, 22);
-        MakeLabel(hwnd, L"Note W", 130, 202, 58, 22);
-        MakeEdit(hwnd, IDC_NOTE_WIDTH, L"", 190, 200, 46, 24);
-        MakeLabel(hwnd, L"Note H", 248, 202, 58, 22);
-        MakeEdit(hwnd, IDC_NOTE_HEIGHT, L"", 308, 200, 46, 24);
-        MakeLabel(hwnd, L"Lane %", 366, 202, 54, 22);
-        MakeEdit(hwnd, IDC_LANE_SPACING, L"", 424, 200, 46, 24);
-
-        MakeLabel(hwnd, L"Visual", 18, 238, 110, 22);
-        MakeButton(hwnd, IDC_VIS_CLASSIC, L"Classic", 130, 234, 72, 28);
-        MakeButton(hwnd, IDC_VIS_NEON, L"Neon", 212, 234, 72, 28);
-        MakeButton(hwnd, IDC_VIS_MINIMAL, L"Minimal", 294, 234, 72, 28);
-        MakeLabel(hwnd, L"Opacity %", 378, 238, 70, 22);
-        MakeEdit(hwnd, IDC_OPACITY, L"", 450, 236, 40, 24);
-
-        MakeButton(hwnd, IDC_DEBUG_BG, L"Debug background", 130, 274, 150, 24, BS_AUTOCHECKBOX);
-        MakeButton(hwnd, IDC_LANE_BG, L"Lane background", 290, 274, 150, 24, BS_AUTOCHECKBOX);
-        MakeButton(hwnd, IDC_ROUNDED_BOXES, L"Rounded boxes", 130, 304, 150, 24, BS_AUTOCHECKBOX);
-        MakeButton(hwnd, IDC_THIN_OUTLINE, L"Thin outline", 290, 304, 120, 24, BS_AUTOCHECKBOX);
-        MakeButton(hwnd, IDC_CIRCLE_NOTES, L"Circle notes", 130, 334, 120, 24, BS_AUTOCHECKBOX);
-        MakeButton(hwnd, IDC_KEY_TEXT_BOTTOM, L"Key labels bottom", 260, 334, 150, 24, BS_AUTOCHECKBOX);
-        MakeButton(hwnd, IDC_CLICK_THROUGH, L"Click-through", 130, 364, 120, 24, BS_AUTOCHECKBOX);
-        MakeButton(hwnd, IDC_TOPMOST, L"Always on top", 260, 364, 150, 24, BS_AUTOCHECKBOX);
-
-        MakeButton(hwnd, IDC_APPLY, L"Apply", 130, 410, 78, 30);
-        MakeButton(hwnd, IDC_SAVE, L"Save", 220, 410, 78, 30);
-        MakeButton(hwnd, IDC_TEST, L"Test notes", 310, 410, 100, 30);
-        {
-            HWND status = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, 18, 458, 472, 22,
-                                        hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), gInstance, nullptr);
-            SendMessageW(status, WM_SETFONT, reinterpret_cast<WPARAM>(gGuiFont), TRUE);
-        }
-
-        FillSettingsControls(hwnd);
+    if (gTaskbarCreatedMessage && msg == gTaskbarCreatedMessage) {
+        // Explorer lost all notification icons; register this live app again.
+        gTrayAdded = gTrayVersion4 = false;
+        if (gAppRunning && !gShuttingDown) AddTrayIcon();
         return 0;
-    case WM_COMMAND:
-        switch (LOWORD(wParam)) {
-        case IDC_PRESET_5:
-            ApplyPreset(kPresets[0].mode, kPresets[0].lanes);
-            SpawnTestNotes();
-            return 0;
-        case IDC_PRESET_8:
-            ApplyPreset(kPresets[1].mode, kPresets[1].lanes);
-            SpawnTestNotes();
-            return 0;
-        case IDC_PRESET_10:
-            ApplyPreset(kPresets[2].mode, kPresets[2].lanes);
-            SpawnTestNotes();
-            return 0;
-        case IDC_VIS_CLASSIC:
-            ApplyVisualPresetButton(L"Classic");
-            SpawnTestNotes();
-            return 0;
-        case IDC_VIS_NEON:
-            ApplyVisualPresetButton(L"Neon");
-            SpawnTestNotes();
-            return 0;
-        case IDC_VIS_MINIMAL:
-            ApplyVisualPresetButton(L"Minimal");
-            SpawnTestNotes();
-            return 0;
-        case IDC_APPLY:
-            ReadSettingsControls();
-            SpawnTestNotes();
-            return 0;
-        case IDC_SAVE:
-            ReadSettingsControls();
-            if (SaveConfig()) {
-                SetStatus(L"saved: " + gConfigPath);
-            } else {
-                SetStatus(L"save failed: " + gConfigPath);
-                MessageBoxW(hwnd, gConfigPath.c_str(), L"Failed to save config", MB_ICONERROR);
-            }
-            return 0;
-        case IDC_TEST:
-            ReadSettingsControls();
-            SpawnTestNotes();
-            return 0;
+    }
+    switch (msg) {
+    case WM_APP_TRAY: {
+        if (gShuttingDown || gCloseInProgress) return 0;
+        const UINT event = TrayEvent(wParam, lParam);
+        if (event == NIN_SELECT || event == NIN_KEYSELECT || event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK)
+            ShowSettingsWindow();
+        else if (event == WM_CONTEXTMENU || event == WM_RBUTTONUP) ShowTrayMenu(hwnd);
+        return 0;
+    }
+    case WM_CREATE: {
+        gSettingsWnd = hwnd;
+        for (auto& page : gPageControls) page.clear();
+        gBuildingPage = -1;
+        gFillingControls = true;
+        MakeLabel(hwnd, L"Key Note Overlay  ·  설정", 18, 14, 680, 26);
+        HWND tabs = TrackControl(CreateWindowW(WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS,
+            18, 50, 684, 430, hwnd, reinterpret_cast<HMENU>(IDC_TABS), gInstance, nullptr));
+        const wchar_t* titles[] = {L"키 배치", L"위치 · OBS", L"모양 · 움직임", L"난이도", L"키 색상"};
+        for (int i = 0; i < static_cast<int>(gPageControls.size()); ++i) {
+            TCITEMW item{}; item.mask = TCIF_TEXT; item.pszText = const_cast<wchar_t*>(titles[i]);
+            TabCtrl_InsertItem(tabs, i, &item);
+        }
+        gBuildingPage = 0;
+        MakeLabel(hwnd, L"키 프리셋", 38, 96, 105, 24);
+        HWND combo = TrackControl(CreateWindowW(L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+            150, 92, 190, 250, hwnd, reinterpret_cast<HMENU>(IDC_PRESET), gInstance, nullptr));
+        SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"사용자 지정"));
+        SendMessageW(combo, CB_SETITEMDATA, 0, -1);
+        for (int index : {3, 0, 4, 5, 1, 6, 2}) {
+            LRESULT item = SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(kPresets[static_cast<size_t>(index)].mode));
+            SendMessageW(combo, CB_SETITEMDATA, item, index);
+        }
+        MakeLabel(hwnd, L"왼쪽 → 오른쪽 키 순서", 38, 136, 260, 24);
+        TrackControl(CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
+            38, 164, 260, 214, hwnd, reinterpret_cast<HMENU>(IDC_LANE_LIST), gInstance, nullptr));
+        MakeButton(hwnd, IDC_RECORD, L"순서대로 등록", 320, 164, 160, 32);
+        MakeButton(hwnd, IDC_REPLACE, L"선택 키 변경", 492, 164, 170, 32);
+        MakeButton(hwnd, IDC_MOVE_LEFT, L"← 앞으로", 320, 208, 105, 30);
+        MakeButton(hwnd, IDC_MOVE_RIGHT, L"뒤로 →", 435, 208, 105, 30);
+        MakeButton(hwnd, IDC_REMOVE, L"삭제", 550, 208, 112, 30);
+        MakeLabel(hwnd, L"순서대로 등록: 원하는 키를 왼쪽부터 누르세요.\n선택 키 변경: 목록에서 키를 고른 뒤 누르세요.\n키 수별 배치는 [적용 + 저장]으로 기억해요.\nEsc로 등록 취소 · 다른 창으로 이동하면 취소\n숫자패드와 좌우 Shift / Ctrl / Alt도 구분해요.", 320, 256, 344, 116);
+        MakeLabel(hwnd, L"직접 입력 (쉼표 구분, 예: D,F,SPACE,J,K)", 38, 386, 624, 22);
+        MakeEdit(hwnd, IDC_LANES, L"", 38, 410, 624, 26);
+        MakeLabel(hwnd, L"", 38, 444, 624, 28, IDC_LANE_SUMMARY);
+
+        gBuildingPage = 1;
+        MakeButton(hwnd, IDC_GAME_OVERLAY, L"게임용 모드 (osu! · Qwilight 입력 / 항상 표시)", 38, 92, 624, 26, BS_AUTOCHECKBOX);
+        MakeLabel(hwnd, L"X", 38, 138, 24, 24); MakeEdit(hwnd, IDC_X, L"", 70, 134, 110, 26);
+        MakeLabel(hwnd, L"Y", 210, 138, 24, 24); MakeEdit(hwnd, IDC_Y, L"", 242, 134, 110, 26);
+        MakeButton(hwnd, IDC_CENTER, L"이 모니터 중앙으로", 390, 132, 238, 30);
+        MakeButton(hwnd, IDC_MOVE_MODE, L"마우스로 위치 이동", 38, 174, 200, 30);
+        MakeButton(hwnd, IDC_SAVE_POSITION, L"위치 저장", 248, 174, 160, 30);
+        MakeLabel(hwnd, L"오버레이 크기 (px)", 38, 218, 220, 24);
+        MakeLabel(hwnd, L"가로", 38, 258, 50, 24); MakeEdit(hwnd, IDC_WIDTH, L"", 96, 254, 110, 26);
+        MakeLabel(hwnd, L"세로", 242, 258, 50, 24); MakeEdit(hwnd, IDC_HEIGHT, L"", 300, 254, 110, 26);
+        MakeButton(hwnd, IDC_CLICK_THROUGH, L"마우스 클릭을 뒤쪽 창으로 통과", 38, 300, 420, 26, BS_AUTOCHECKBOX);
+        MakeButton(hwnd, IDC_TOPMOST, L"항상 위에 표시", 38, 334, 280, 26, BS_AUTOCHECKBOX);
+        MakeButton(hwnd, IDC_DEBUG_BG, L"위치 확인용 배경 표시", 38, 368, 350, 26, BS_AUTOCHECKBOX);
+        MakeLabel(hwnd, L"클릭 통과·항상 위 · 디스코드/OBS로 전환해도 표시 유지 (게임 밖 입력 제외)\nosu!는 창 모드/테두리 없는 전체화면, Qwilight는 창/전체 화면을 사용하세요.", 38, 404, 624, 44);
+        MakeLabel(hwnd, L"", 38, 452, 624, 24, IDC_GAME_STATUS);
+
+        gBuildingPage = 2;
+        MakeLabel(hwnd, L"테마", 38, 98, 70, 24);
+        MakeButton(hwnd, IDC_VIS_CLASSIC, L"Classic", 120, 92, 110, 30);
+        MakeButton(hwnd, IDC_VIS_NEON, L"Neon", 242, 92, 110, 30);
+        MakeButton(hwnd, IDC_VIS_MINIMAL, L"Minimal", 364, 92, 110, 30);
+        MakeLabel(hwnd, L"", 490, 98, 174, 24, IDC_VISUAL_NAME);
+        MakeLabel(hwnd, L"노트 너비 (24~220)", 38, 150, 185, 24); MakeEdit(hwnd, IDC_NOTE_WIDTH, L"", 236, 146, 76, 26);
+        MakeLabel(hwnd, L"노트 높이 (18~140)", 348, 150, 185, 24); MakeEdit(hwnd, IDC_NOTE_HEIGHT, L"", 554, 146, 90, 26);
+        MakeLabel(hwnd, L"레인 간격 % (50~160)", 38, 192, 195, 24); MakeEdit(hwnd, IDC_LANE_SPACING, L"", 236, 188, 76, 26);
+        MakeLabel(hwnd, L"불투명도 % (20~100)", 348, 192, 200, 24); MakeEdit(hwnd, IDC_OPACITY, L"", 554, 188, 90, 26);
+        MakeLabel(hwnd, L"사라지는 시간 ms", 38, 234, 195, 24); MakeEdit(hwnd, IDC_DURATION, L"", 236, 230, 76, 26);
+        MakeLabel(hwnd, L"이동 거리 px", 348, 234, 195, 24); MakeEdit(hwnd, IDC_TRAVEL, L"", 554, 230, 90, 26);
+        MakeLabel(hwnd, L"롱노트 진하기 (32~180)", 38, 276, 195, 24); MakeEdit(hwnd, IDC_LONG_ALPHA, L"", 236, 272, 76, 26);
+        MakeButton(hwnd, IDC_CIRCLE_NOTES, L"원형 노트", 38, 320, 260, 26, BS_AUTOCHECKBOX);
+        MakeButton(hwnd, IDC_LANE_BG, L"레인 배경", 348, 320, 260, 26, BS_AUTOCHECKBOX);
+        MakeButton(hwnd, IDC_ROUNDED_BOXES, L"둥근 모서리", 38, 356, 260, 26, BS_AUTOCHECKBOX);
+        MakeButton(hwnd, IDC_THIN_OUTLINE, L"얇은 테두리", 348, 356, 260, 26, BS_AUTOCHECKBOX);
+        MakeButton(hwnd, IDC_KEY_TEXT_BOTTOM, L"키 이름을 아래쪽에 표시", 38, 392, 420, 26, BS_AUTOCHECKBOX);
+        MakeLabel(hwnd, L"[적용 + 테스트]로 현재 편집한 모양과 움직임을 확인할 수 있어요.", 38, 438, 624, 28);
+        gBuildingPage = 3;
+        MakeButton(hwnd, IDC_DIFFICULTY_ENABLED, L"입력 난이도 분석 사용", 38, 96, 290, 26, BS_AUTOCHECKBOX);
+        MakeButton(hwnd, IDC_DIFFICULTY_HUD, L"OBS 오버레이에도 표시", 348, 96, 310, 26, BS_AUTOCHECKBOX);
+        EnsureHudFonts();
+        HWND profileLabel = MakeLabel(hwnd, L"실시간 분석", 38, 130, 156, 20, IDC_DIFFICULTY_PROFILE);
+        HWND previousLabel = MakeLabel(hwnd, L"아까 쳤던 패턴은:", 206, 130, 288, 20);
+        HWND npsCaption = MakeLabel(hwnd, L"최근 1초 입력", 506, 130, 156, 20);
+        HWND scoreLabel = MakeLabel(hwnd, L"대기", 38, 152, 156, 32, IDC_DIFFICULTY_SCORE);
+        HWND previousValue = MakeLabel(hwnd, L"측정이 끝나면 표시됩니다.", 206, 152, 288, 32, IDC_DIFFICULTY_PREVIOUS);
+        HWND npsLabel = MakeLabel(hwnd, L"NPS  0.0", 506, 152, 156, 32, IDC_DIFFICULTY_NPS);
+        for (HWND control : {profileLabel, previousLabel, npsCaption, scoreLabel, previousValue, npsLabel})
+            SetWindowLongPtrW(control, GWL_STYLE, GetWindowLongPtrW(control, GWL_STYLE) | SS_CENTER);
+        for (HWND control : {profileLabel, previousLabel, npsCaption})
+            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(gHudLabelFont), TRUE);
+        SendMessageW(scoreLabel, WM_SETFONT, reinterpret_cast<WPARAM>(gHudSmallFont), TRUE);
+        SendMessageW(previousValue, WM_SETFONT, reinterpret_cast<WPARAM>(gHudSmallFont), TRUE);
+        SendMessageW(npsLabel, WM_SETFONT, reinterpret_cast<WPARAM>(gHudSmallFont), TRUE);
+        HWND progress = TrackControl(CreateWindowW(PROGRESS_CLASSW, L"", WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
+            38, 194, 624, 14, hwnd, reinterpret_cast<HMENU>(IDC_DIFFICULTY_BAR), gInstance, nullptr));
+        SendMessageW(progress, PBM_SETRANGE32, 0, 100);
+        MakeLabel(hwnd, L"", 38, 218, 624, 122, IDC_DIFFICULTY_METRICS);
+        MakeLabel(hwnd, L"난이도 8초 / NPS 1초 · 단위 클리어 판정이 아닙니다. 키 등록·테스트 제외.", 38, 344, 624, 24);
+        MakeButton(hwnd, IDC_REPORT_AUTO, L"연주 리포트 자동 저장 (레인·타이밍 포함, 로컬 HTML)", 38, 374, 624, 26, BS_AUTOCHECKBOX);
+        MakeLabel(hwnd, L"", 38, 404, 624, 38, IDC_REPORT_STATUS);
+        MakeButton(hwnd, IDC_DIFFICULTY_RESET, L"분석 초기화", 38, 450, 180, 30);
+        MakeButton(hwnd, IDC_REPORT_OPEN, L"리포트 폴더 열기", 234, 450, 208, 30);
+        MakeButton(hwnd, IDC_REPORT_RETRY, L"저장 재시도", 458, 450, 204, 30);
+        gBuildingPage = 4;
+        MakeLabel(hwnd, L"색과 투명도를 바꿀 키", 38, 98, 238, 24);
+        TrackControl(CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
+            38, 132, 230, 264, hwnd, reinterpret_cast<HMENU>(IDC_STYLE_KEYS), gInstance, nullptr));
+        MakeLabel(hwnd, L"", 298, 98, 360, 24, IDC_STYLE_NAME);
+        MakeLabel(hwnd, L"색상 HEX (#RRGGBB)", 298, 134, 360, 24);
+        MakeEdit(hwnd, IDC_KEY_COLOR, L"", 298, 162, 174, 28);
+        MakeButton(hwnd, IDC_PICK_COLOR, L"색상 선택…", 488, 160, 174, 32);
+        MakeLabel(hwnd, L"불투명도 % (0~100)", 298, 206, 250, 24);
+        MakeEdit(hwnd, IDC_KEY_OPACITY, L"100", 552, 202, 110, 28);
+        MakeLabel(hwnd, L"0% 숨김 · 100% 진하게 / 빈 HEX는 기본색", 298, 244, 364, 26);
+        MakeButton(hwnd, IDC_STYLE_PREVIEW, L"", 298, 282, 364, 68, BS_OWNERDRAW);
+        MakeButton(hwnd, IDC_RESET_KEY_STYLE, L"선택 키 기본값", 298, 366, 364, 30);
+        MakeLabel(hwnd, L"노트·롱노트·잔상에 함께 적용됩니다. 전체 불투명도와 곱해집니다.\n키 순서와 프리셋을 바꿔도 키별 설정을 유지합니다. [적용 + 저장]으로 기억해요.", 38, 420, 624, 54);
+        gBuildingPage = -1;
+        MakeLabel(hwnd, L"", 18, 490, 684, 24, IDC_DIRTY);
+        MakeButton(hwnd, IDC_APPLY, L"적용", 18, 520, 100, 32);
+        MakeButton(hwnd, IDC_SAVE, L"적용 + 저장", 130, 520, 140, 32);
+        MakeButton(hwnd, IDC_TEST, L"적용 + 테스트", 282, 520, 150, 32);
+        MakeButton(hwnd, IDC_REVERT, L"저장 상태로 되돌리기", 444, 520, 258, 32);
+        MakeLabel(hwnd, L"", 18, 562, 684, 42, IDC_STATUS);
+        FillSettingsControls(hwnd);
+        ShowSettingsPage(0);
+        RefreshDifficultyDisplay();
+        if (!gUiSelfTest) SetTimer(hwnd, TIMER_DIFFICULTY, 100, nullptr);
+        SetStatus(L"키 배치를 고르고 [적용 + 테스트]로 확인해 보세요.");
+        return 0;
+    }
+    case WM_TIMER:
+        if (wParam == TIMER_DIFFICULTY) RefreshDifficultyDisplay();
+        if (wParam == TIMER_TRAY_RETRY && gAppRunning) AddTrayIcon();
+        return 0;
+    case WM_DRAWITEM:
+        if (wParam == IDC_STYLE_PREVIEW) {
+            const auto* draw = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+            DrawStylePreview(draw->hDC, draw->rcItem); return TRUE;
         }
         break;
+    case WM_NOTIFY:
+        if (reinterpret_cast<NMHDR*>(lParam)->idFrom == IDC_TABS && reinterpret_cast<NMHDR*>(lParam)->code == TCN_SELCHANGE)
+            ShowSettingsPage(TabCtrl_GetCurSel(GetDlgItem(hwnd, IDC_TABS)));
+        return 0;
+    case WM_COMMAND: {
+        const int id = LOWORD(wParam);
+        const int event = HIWORD(wParam);
+        if (id == ID_TRAY_SETTINGS) { ShowSettingsWindow(); return 0; }
+        if (id == ID_TRAY_EXIT) { RequestApplicationClose(); return 0; }
+        if (id == ID_TRAY_MOVE) { ToggleOverlayMoveMode(); return 0; }
+        if (gFillingControls) return 0;
+        if (event == EN_CHANGE) {
+            if (gStyleVk && (id == IDC_KEY_COLOR || id == IDC_KEY_OPACITY)) {
+                auto& draft = gDraftKeyStyles[gStyleVk];
+                (id == IDC_KEY_COLOR ? draft.color : draft.opacity) = WindowText(GetDlgItem(hwnd, id));
+                InvalidateRect(GetDlgItem(hwnd, IDC_STYLE_PREVIEW), nullptr, TRUE);
+            }
+            MarkEdited();
+            if (id == IDC_LANES) RefreshLaneEditor();
+            return 0;
+        }
+        if (id == IDC_STYLE_KEYS && event == LBN_SELCHANGE) {
+            const int selected = static_cast<int>(SendDlgItemMessageW(hwnd, id, LB_GETCURSEL, 0, 0));
+            gStyleVk = selected < 0 ? 0 : static_cast<UINT>(SendDlgItemMessageW(hwnd, id, LB_GETITEMDATA, selected, 0));
+            FillKeyStyleFields(); return 0;
+        }
+        if (id == IDC_PRESET && event == CBN_SELCHANGE) {
+            HWND combo = GetDlgItem(hwnd, IDC_PRESET);
+            int selected = static_cast<int>(SendMessageW(combo, CB_GETCURSEL, 0, 0));
+            int index = static_cast<int>(SendMessageW(combo, CB_GETITEMDATA, selected, 0));
+            if (index >= 0 && index < static_cast<int>(kPresets.size())) {
+                // Retain the previous valid draft before changing key counts;
+                // neither selection nor typing changes the active mapping yet.
+                RememberPreset(gDraftPresetLanes, WindowText(GetDlgItem(hwnd, IDC_LANES)));
+                const auto& custom = gDraftPresetLanes[static_cast<std::size_t>(index)];
+                SetWindowTextW(GetDlgItem(hwnd, IDC_LANES), custom.empty() ? kPresets[index].lanes : custom.c_str());
+                SetStatus(L"기억한 키 배치를 불러왔어요. [적용 + 저장]하면 키 수별 배치가 다음 실행에도 유지됩니다.");
+            }
+            return 0;
+        }
+        if (event != BN_CLICKED) break;
+        switch (id) {
+        case IDC_PICK_COLOR: PickKeyColor(); return 0;
+        case IDC_RESET_KEY_STYLE:
+            if (gStyleVk) { gDraftKeyStyles[gStyleVk] = {}; FillKeyStyleFields(); MarkEdited(); }
+            return 0;
+        case IDC_RECORD: BeginKeyCapture(CaptureMode::Sequence); return 0;
+        case IDC_REPLACE: BeginKeyCapture(CaptureMode::Replace); return 0;
+        case IDC_MOVE_LEFT: case IDC_MOVE_RIGHT: case IDC_REMOVE: EditSelectedLane(id); return 0;
+        case IDC_CENTER: CenterOverlayDraft(); return 0;
+        case IDC_MOVE_MODE: ToggleOverlayMoveMode(); return 0;
+        case IDC_SAVE_POSITION: SavePositionDraft(); return 0;
+        case IDC_REPORT_OPEN: {
+            const auto directory = ReportDirectory();
+            std::error_code error;
+            if (!std::filesystem::is_directory(directory, error)) {
+                SetStatus(L"아직 리포트 폴더가 없어요. 자동 저장을 켜고 연주를 마쳐 주세요.");
+            } else if (!gUiSelfTest && reinterpret_cast<INT_PTR>(ShellExecuteW(hwnd, L"open", directory.c_str(), nullptr, nullptr, SW_SHOWNORMAL)) <= 32) {
+                SetStatus(L"리포트 폴더를 열지 못했어요: " + directory.wstring());
+            }
+            return 0;
+        }
+        case IDC_REPORT_RETRY:
+            gReportSaveFailed = false;
+            PollReportWrites(); RefreshReportStatus(); return 0;
+        case IDC_DIFFICULTY_RESET:
+            ResetDifficulty(static_cast<int>(gConfig.lanes.size()));
+            RefreshDifficultyDisplay();
+            SetStatus(L"난이도 분석을 초기화했어요. 새 패턴을 입력해 보세요.");
+            return 0;
+        case IDC_VIS_CLASSIC: case IDC_VIS_NEON: case IDC_VIS_MINIMAL: {
+            Config theme = gConfig;
+            ApplyVisualPreset(id == IDC_VIS_CLASSIC ? L"Classic" : id == IDC_VIS_NEON ? L"Neon" : L"Minimal", theme);
+            FillAppearance(theme);
+            MarkEdited();
+            SetStatus(L"테마를 선택했어요. 다른 탭에서 편집한 내용은 그대로 유지됩니다.");
+            return 0;
+        }
+        case IDC_APPLY: ReadSettingsControls(); return 0;
+        case IDC_SAVE: SaveSettings(); return 0;
+        case IDC_TEST: if (ReadSettingsControls()) SpawnTestNotes(); return 0;
+        case IDC_REVERT:
+            if (gConfig.lanesText != gSavedConfig.lanesText || gConfig.difficultyEnabled != gSavedConfig.difficultyEnabled ||
+                gConfig.reportAutoSave != gSavedConfig.reportAutoSave || gConfig.gameOverlay != gSavedConfig.gameOverlay)
+                ResetDifficulty(static_cast<int>(gSavedConfig.lanes.size()));
+            gConfig = gSavedConfig;
+            RebuildLaneConfig();
+            ResetInputRuntimeState();
+            gUnapplied = gUnsaved = false;
+            FillSettingsControls(hwnd);
+            RefreshDifficultyDisplay();
+            if (!gUiSelfTest) ApplyOverlayWindowStyle();
+            SetStatus(L"마지막 저장 상태로 오버레이와 편집 내용을 되돌렸어요.");
+            return 0;
+        case IDC_DEBUG_BG: case IDC_CLICK_THROUGH: case IDC_TOPMOST: case IDC_CIRCLE_NOTES:
+        case IDC_LANE_BG: case IDC_ROUNDED_BOXES: case IDC_THIN_OUTLINE: case IDC_KEY_TEXT_BOTTOM:
+        case IDC_DIFFICULTY_ENABLED: case IDC_DIFFICULTY_HUD: case IDC_REPORT_AUTO:
+            MarkEdited(); return 0;
+        case IDC_GAME_OVERLAY:
+            if (SendDlgItemMessageW(hwnd, IDC_GAME_OVERLAY, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+                SendDlgItemMessageW(hwnd, IDC_CLICK_THROUGH, BM_SETCHECK, BST_CHECKED, 0);
+                SendDlgItemMessageW(hwnd, IDC_TOPMOST, BM_SETCHECK, BST_CHECKED, 0);
+                SendDlgItemMessageW(hwnd, IDC_DEBUG_BG, BM_SETCHECK, BST_UNCHECKED, 0);
+            }
+            MarkEdited(); return 0;
+        }
+        break;
+    }
+    case WM_ACTIVATE:
+        if (LOWORD(wParam) == WA_INACTIVE) EndKeyCapture(true);
+        break;
     case WM_CLOSE:
-        DestroyWindow(hwnd);
+        if (gCloseInProgress || gShuttingDown) return 0;
+        gCloseInProgress = true;
+        EndKeyCapture(true);
+        if (gUnapplied || gUnsaved) {
+            int choice = gExitMessageBox(hwnd, L"저장하지 않은 설정이 있어요. 적용하고 저장한 뒤 종료할까요?\n\n예: 적용 후 저장 / 아니요: 저장하지 않고 종료 / 취소: 계속 편집",
+                L"설정 저장", MB_YESNOCANCEL | MB_ICONQUESTION);
+            if (choice == IDCANCEL || (choice == IDYES && !SaveSettings())) {
+                gCloseInProgress = false;
+                return 0;
+            }
+        }
+        FinishSessionReport("앱 종료 · 진행 중 기록", NowMs());
+        PollReportWrites(true);
+        if (!gPendingReports.empty()) {
+            const int choice = gExitMessageBox(hwnd,
+                L"연주 리포트를 저장하지 못했어요. 아직 파일로 저장되지 않은 기록이 있습니다.\n\n예: 미저장 리포트를 버리고 종료 / 아니요: 돌아가서 저장 재시도",
+                L"리포트 저장 실패", MB_YESNO | MB_ICONWARNING);
+            if (choice != IDYES) { gCloseInProgress = false; RefreshReportStatus(); return 0; }
+            gPendingReports.clear();
+        }
+        ShutdownApplication();
+        return 0;
+    case WM_ENDSESSION:
+        if (wParam) ShutdownApplication();
         return 0;
     case WM_DESTROY:
-        PostQuitMessage(0);
+        KillTimer(hwnd, TIMER_DIFFICULTY);
+        RemoveTrayIcon();
+        if (gSettingsWnd == hwnd) gSettingsWnd = nullptr;
+        if (!gShuttingDown) ShutdownApplication();
         return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 bool RegisterWindows() {
+    gTaskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
     WNDCLASSW overlay{};
     overlay.lpfnWndProc = OverlayProc;
     overlay.hInstance = gInstance;
@@ -1492,6 +2934,9 @@ bool RegisterWindows() {
 
 LRESULT CALLBACK KeyboardProc(int code, WPARAM wParam, LPARAM lParam) {
     if (code == HC_ACTION) {
+        // Recording is local to the focused settings window. Never swallow global input.
+        if (gCaptureMode != CaptureMode::None && GetForegroundWindow() == gSettingsWnd)
+            return CallNextHookEx(gKeyboardHook, code, wParam, lParam);
         const KBDLLHOOKSTRUCT* data = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lParam);
         UINT vk = data->vkCode;
         bool keyDown = wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN;
@@ -1502,16 +2947,18 @@ LRESULT CALLBACK KeyboardProc(int code, WPARAM wParam, LPARAM lParam) {
             int lane = gVkToLaneIndex[vk];
             if (lane >= 0) {
                 gPendingLaneUpMs[static_cast<size_t>(lane)] = NowMs();
+                RecordDifficultyInput(lane, false, gPendingLaneUpMs[static_cast<size_t>(lane)]);
                 PostMessageW(gOverlayWnd, WM_APP_KEY_UP, static_cast<WPARAM>(lane), 0);
             }
         } else if (vk < gKeyDown.size() && keyDown) {
             if (vk == VK_F12 && (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_SHIFT) & 0x8000)) {
                 PostMessageW(gSettingsWnd, WM_CLOSE, 0, 0);
-            } else if (!gKeyDown[vk]) {
+            } else if (!gKeyDown[vk] && !gPickingColor && GameInputAllowed()) {
                 gKeyDown[vk] = true;
                 int lane = gVkToLaneIndex[vk];
                 if (lane >= 0) {
                     gPendingLaneDownMs[static_cast<size_t>(lane)] = NowMs();
+                    RecordDifficultyInput(lane, true, gPendingLaneDownMs[static_cast<size_t>(lane)]);
                     PostMessageW(gOverlayWnd, WM_APP_KEY_DOWN, static_cast<WPARAM>(lane), 0);
                 }
             }
@@ -1520,19 +2967,37 @@ LRESULT CALLBACK KeyboardProc(int code, WPARAM wParam, LPARAM lParam) {
     return CallNextHookEx(gKeyboardHook, code, wParam, lParam);
 }
 
+BOOL CALLBACK CollectMonitorWorkArea(HMONITOR monitor, HDC, LPRECT, LPARAM param) {
+    MONITORINFO info{}; info.cbSize = sizeof(info);
+    if (GetMonitorInfoW(monitor, &info)) reinterpret_cast<std::vector<RECT>*>(param)->push_back(info.rcWork);
+    return TRUE;
+}
+
+bool PlaceInitialSettingsWindow() {
+    RECT overlay{}, settings{};
+    if (!GetWindowRect(gOverlayWnd, &overlay) || !GetWindowRect(gSettingsWnd, &settings)) return false;
+    std::vector<RECT> workAreas;
+    MONITORINFO nearest{}; nearest.cbSize = sizeof(nearest);
+    if (GetMonitorInfoW(MonitorFromRect(&overlay, MONITOR_DEFAULTTONEAREST), &nearest)) workAreas.push_back(nearest.rcWork);
+    EnumDisplayMonitors(nullptr, nullptr, CollectMonitorWorkArea, reinterpret_cast<LPARAM>(&workAreas));
+    if (workAreas.empty()) return false;
+    const auto placement = window_placement::BesideOverlay(overlay,
+        SIZE{settings.right - settings.left, settings.bottom - settings.top}, workAreas);
+    // This runs before the settings window is shown, avoiding an initial jump.
+    return SetWindowPos(gSettingsWnd, nullptr, placement.rect.left, placement.rect.top, 0, 0,
+        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE;
+}
+
 bool CreateAppWindows(int showCommand) {
-    DWORD overlayEx = WS_EX_LAYERED | WS_EX_APPWINDOW | WS_EX_NOACTIVATE;
-    if (gConfig.clickThrough) {
-        overlayEx |= WS_EX_TRANSPARENT;
-    }
-    if (gConfig.alwaysOnTop) {
+    DWORD overlayEx = static_cast<DWORD>(game_overlay::ExtendedStyle(0, gConfig.gameOverlay, gConfig.clickThrough, false));
+    if (gConfig.gameOverlay || gConfig.alwaysOnTop) {
         overlayEx |= WS_EX_TOPMOST;
     }
     gOverlayWnd = CreateWindowExW(
         overlayEx,
         L"KeyNoteOverlayCppWindow",
         L"Key Note Overlay C++ Overlay",
-        WS_POPUP | WS_VISIBLE,
+        WS_POPUP,
         gConfig.x,
         gConfig.y,
         gConfig.width,
@@ -1548,15 +3013,18 @@ bool CreateAppWindows(int showCommand) {
     ApplyOverlayWindowStyle();
     ShowWindow(gOverlayWnd, SW_SHOWNA);
 
+    RECT settingsRect{0, 0, 720, 614};
+    const DWORD settingsStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
+    AdjustWindowRectEx(&settingsRect, settingsStyle, FALSE, WS_EX_TOOLWINDOW | WS_EX_CONTROLPARENT);
     gSettingsWnd = CreateWindowExW(
-        WS_EX_TOOLWINDOW,
+        WS_EX_TOOLWINDOW | WS_EX_CONTROLPARENT,
         L"KeyNoteOverlayCppSettings",
         L"Key Note Overlay C++ Settings",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE,
+        settingsStyle,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        530,
-        540,
+        settingsRect.right - settingsRect.left,
+        settingsRect.bottom - settingsRect.top,
         nullptr,
         nullptr,
         gInstance,
@@ -1565,11 +3033,1020 @@ bool CreateAppWindows(int showCommand) {
     if (!gSettingsWnd) {
         return false;
     }
+    PlaceInitialSettingsWindow();
+    gAppRunning = true;
     SetWindowDisplayAffinity(gSettingsWnd, WDA_EXCLUDEFROMCAPTURE);
     (void)showCommand;
     ShowWindow(gSettingsWnd, SW_SHOWNORMAL);
     UpdateWindow(gSettingsWnd);
     return true;
+}
+
+int RunUiSelfTest(bool blockFirstReport = false) {
+    gUiSelfTest = true;
+    InitCommonControls();
+    gGuiFont = CreateSettingsFont();
+    gConfig = Config{};
+    RebuildLaneConfig();
+    gSavedConfig = gConfig;
+    // This mode creates only hidden controls and never installs the keyboard hook.
+    // Its caller supplies an isolated working directory for all generated files.
+    gJsonConfigPath = CurrentDirectory() + L"ui_selftest.json";
+    gIniConfigPath = CurrentDirectory() + L"ui_selftest.ini";
+    gConfigPath = gJsonConfigPath;
+    std::ofstream log("key_note_cpp_ui_selftest.log", std::ios::trunc);
+    log << std::unitbuf; // Preserve the last completed check if a native test aborts.
+    int failures = 0, checks = 0;
+    auto check = [&](const char* name, bool ok) { log << name << "=" << (ok ? "ok" : "FAIL") << "\n"; ++checks; if (!ok) ++failures; };
+    if (!RegisterWindows()) return 1;
+    gSettingsWnd = CreateWindowW(L"KeyNoteOverlayCppSettings", L"test", WS_OVERLAPPEDWINDOW,
+        0, 0, 760, 680, nullptr, nullptr, gInstance, nullptr);
+    if (!gSettingsWnd) return 1;
+    check("initial_clean_state", !gUnapplied && !gUnsaved && !IsWindowVisible(gSettingsWnd));
+    auto click = [&](int id) { SendMessageW(gSettingsWnd, WM_COMMAND, MAKEWPARAM(id, BN_CLICKED), reinterpret_cast<LPARAM>(GetDlgItem(gSettingsWnd, id))); };
+    auto edit = [&](int id, const wchar_t* value) { SetWindowTextW(GetDlgItem(gSettingsWnd, id), value); };
+    auto raw = [&]() { return WindowText(GetDlgItem(gSettingsWnd, IDC_LANES)); };
+    std::vector<std::wstring> tokens;
+    std::wstring error;
+    check("aliases_and_punctuation", ValidateLaneText(L" q,semicolon,comma,spacebar", tokens, error) && JoinLaneTokens(tokens) == L"Q,SEMICOLON,COMMA,SPACE");
+    check("duplicate_alias_rejected", !ValidateLaneText(L"SPACE,SPC", tokens, error));
+    check("empty_lane_rejected", !ValidateLaneText(L"D,,F", tokens, error) && !ValidateLaneText(L"D,", tokens, error) && !ValidateLaneText(L"", tokens, error));
+    check("malformed_key_rejected", !ValidateLaneText(L"F1junk", tokens, error) && !ValidateLaneText(L"UNKNOWN", tokens, error));
+    bool presetsOk = true;
+    for (const auto& preset : kPresets) {
+        presetsOk = presetsOk && ValidateLaneText(preset.lanes, tokens, error) &&
+            tokens.size() == static_cast<size_t>(_wtoi(preset.mode)) && DetectModeForLanes(preset.lanes) == preset.mode;
+    }
+    check("all_seven_presets", presetsOk);
+    int integer = 0;
+    check("integer_validation", ParseInteger(L" -250 ", -32000, 32000, integer) && integer == -250 &&
+        !ParseInteger(L"900px", 240, 10000, integer) && !ParseInteger(L"", 0, 10000, integer) &&
+        !ParseInteger(L"99999999999999999999999999999", 0, 10000, integer) && !ParseInteger(L"101", 20, 100, integer));
+    bool captureTokensOk = true;
+    for (UINT vk : {static_cast<UINT>(VK_OEM_COMMA), static_cast<UINT>(VK_NUMPAD0), static_cast<UINT>(VK_NUMPAD9),
+        static_cast<UINT>(VK_LSHIFT), static_cast<UINT>(VK_RSHIFT), static_cast<UINT>(VK_LCONTROL), static_cast<UINT>(VK_RMENU),
+        static_cast<UINT>(VK_F24), static_cast<UINT>(VK_DIVIDE)}) {
+        UINT back = 0; std::wstring label;
+        captureTokensOk = captureTokensOk && TokenToVk(TokenFromVk(vk), back, label) && back == vk;
+    }
+    check("captured_key_roundtrip", captureTokensOk);
+    edit(IDC_LANES, L"D,F,J,K");
+    check("draft_does_not_apply", gUnapplied && gConfig.lanes.size() == 8 && SendDlgItemMessageW(gSettingsWnd, IDC_LANE_LIST, LB_GETCOUNT, 0, 0) == 4);
+    SendDlgItemMessageW(gSettingsWnd, IDC_LANE_LIST, LB_SETCURSEL, 1, 0);
+    click(IDC_MOVE_RIGHT);
+    check("move_lane_right", raw() == L"D,J,F,K");
+    click(IDC_MOVE_LEFT);
+    check("move_lane_left", raw() == L"D,F,J,K");
+    click(IDC_REMOVE);
+    check("remove_selected_lane", raw() == L"D,J,K");
+    edit(IDC_LANES, L"D"); click(IDC_REMOVE);
+    check("last_lane_preserved", raw() == L"D");
+    edit(IDC_LANES, L"D,F,J,K");
+    check("apply_updates_mapping", ReadSettingsControls() && gConfig.lanes.size() == 4 && !gUnapplied && gUnsaved && gVkToLaneIndex[L'K'] == 3);
+    const Config applied = gConfig;
+    edit(IDC_X, L"123"); edit(IDC_WIDTH, L"invalid");
+    check("invalid_draft_is_atomic", !ReadSettingsControls() && SameConfig(gConfig, applied) && gCurrentPage == 1 && gUnapplied);
+    edit(IDC_WIDTH, L"1000"); edit(IDC_LANES, L"D,D");
+    check("duplicate_keeps_runtime", !ReadSettingsControls() && SameConfig(gConfig, applied) && gCurrentPage == 0);
+    edit(IDC_LANES, L"D,F,J,K");
+    click(IDC_VIS_NEON);
+    check("theme_preserves_other_edits", WindowText(GetDlgItem(gSettingsWnd, IDC_X)) == L"123" &&
+        WindowText(GetDlgItem(gSettingsWnd, IDC_WIDTH)) == L"1000" && raw() == L"D,F,J,K" && gConfig.visualPreset == applied.visualPreset);
+    check("save_updates_snapshot", SaveSettings() && !gUnapplied && !gUnsaved && SameConfig(gConfig, gSavedConfig) && gConfig.x == 123 && gConfig.visualPreset == L"Neon");
+    const Config saved = gSavedConfig;
+    gConfig = Config{};
+    check("saved_json_roundtrip", LoadJsonConfig() && (ClampAndRebuildConfig(), SameConfig(gConfig, saved)));
+    gConfig = saved;
+    RebuildLaneConfig(); FillSettingsControls(gSettingsWnd);
+    BeginKeyCapture(CaptureMode::Sequence);
+    CaptureKey(L'Q'); CaptureKey(L'W'); CaptureKey(L'Q');
+    check("record_duplicate_rejected", raw() == L"Q,W" && gCaptureMode == CaptureMode::Sequence && SameConfig(gConfig, saved));
+    CaptureKey(VK_OEM_COMMA);
+    check("record_punctuation", raw() == L"Q,W,COMMA");
+    CaptureKey(VK_ESCAPE);
+    check("record_cancel_restores_draft", raw() == saved.lanesText && gCaptureMode == CaptureMode::None && !gUnapplied && !gUnsaved);
+    BeginKeyCapture(CaptureMode::Sequence); CaptureKey(L'A'); CaptureKey(L'S'); EndKeyCapture(false);
+    check("record_finish_is_draft", raw() == L"A,S" && gUnapplied && SameConfig(gConfig, saved));
+    SendDlgItemMessageW(gSettingsWnd, IDC_LANE_LIST, LB_SETCURSEL, 1, 0);
+    BeginKeyCapture(CaptureMode::Replace); CaptureKey(L'A');
+    check("replace_duplicate_stays_recording", raw() == L"A,S" && gCaptureMode == CaptureMode::Replace);
+    CaptureKey(VK_RSHIFT);
+    check("replace_selected_key", raw() == L"A,RSHIFT" && gCaptureMode == CaptureMode::None);
+    BeginKeyCapture(CaptureMode::Sequence); CaptureKey(L'Z');
+    SendMessageW(gSettingsWnd, WM_ACTIVATE, WA_INACTIVE, 0);
+    check("focus_loss_cancels_capture", raw() == L"A,RSHIFT" && gCaptureMode == CaptureMode::None && gUnapplied);
+    click(IDC_REVERT);
+    check("restore_saved_state", raw() == saved.lanesText && SameConfig(gConfig, saved) && !gUnapplied && !gUnsaved);
+    HWND combo = GetDlgItem(gSettingsWnd, IDC_PRESET);
+    SendMessageW(combo, CB_SETCURSEL, 4, 0);
+    SendMessageW(gSettingsWnd, WM_COMMAND, MAKEWPARAM(IDC_PRESET, CBN_SELCHANGE), reinterpret_cast<LPARAM>(combo));
+    check("preset_selection_is_draft", raw() == L"S,D,F,SPACE,J,K,L" && SameConfig(gConfig, saved) && gUnapplied);
+    click(IDC_REVERT);
+    auto selectPreset = [&](int count) {
+        const int target = PresetIndexForCount(static_cast<std::size_t>(count));
+        for (int row = 1; row <= static_cast<int>(kPresets.size()); ++row) {
+            if (SendMessageW(combo, CB_GETITEMDATA, row, 0) == target) {
+                SendMessageW(combo, CB_SETCURSEL, row, 0);
+                SendMessageW(gSettingsWnd, WM_COMMAND, MAKEWPARAM(IDC_PRESET, CBN_SELCHANGE), reinterpret_cast<LPARAM>(combo));
+                break;
+            }
+        }
+    };
+    const std::vector<std::wstring> customKeys{L"Q",L"W",L"E",L"R",L"T",L"Y",L"U",L"I",L"O",L"P"};
+    for (int count=4; count<=10; ++count) {
+        selectPreset(count);
+        edit(IDC_LANES, JoinLaneTokens(std::vector<std::wstring>(customKeys.begin(),customKeys.begin()+count)).c_str());
+    }
+    selectPreset(4);
+    check("preset_switch_retains_all_drafts", raw() == L"Q,W,E,R" && SameConfig(gConfig,saved) && gUnapplied && DetectModeForLanes(raw()) == L"4K");
+    BeginKeyCapture(CaptureMode::Sequence);
+    for (UINT key : {L'A',L'S',L'K',L'L'}) CaptureKey(key);
+    EndKeyCapture(false);
+    selectPreset(8); selectPreset(4);
+    check("recorded_layout_stays_in_its_preset", raw() == L"A,S,K,L");
+    edit(IDC_LANES,L"D,D"); selectPreset(7); selectPreset(4);
+    check("invalid_draft_cannot_poison_preset", raw() == L"A,S,K,L");
+    check("custom_presets_save", SaveSettings());
+    const Config customSaved = gSavedConfig;
+    gConfig = Config{};
+    check("all_presets_json_reload", LoadJsonConfig() && (ClampAndRebuildConfig(), SameConfig(gConfig,customSaved)));
+    FillSettingsControls(gSettingsWnd);
+    bool restoredPresets = true;
+    for (int count=4; count<=10; ++count) {
+        selectPreset(count);
+        const auto expected = count == 4 ? L"A,S,K,L" : JoinLaneTokens(std::vector<std::wstring>(customKeys.begin(),customKeys.begin()+count));
+        restoredPresets = restoredPresets && raw() == expected;
+    }
+    check("all_presets_reselected_after_reload", restoredPresets);
+    gConfig = Config{}; LoadIniConfig(); ClampAndRebuildConfig();
+    check("all_presets_ini_reload", SameConfig(gConfig,customSaved));
+    gConfig = customSaved; FillSettingsControls(gSettingsWnd);
+    selectPreset(4); edit(IDC_LANES,L"Z,X,C,V"); selectPreset(8); click(IDC_REVERT); selectPreset(4);
+    check("revert_restores_saved_preset_collection", raw() == L"A,S,K,L");
+    const auto presetsJsonPath = gJsonConfigPath;
+    const auto presetsIniPath = gIniConfigPath;
+    gJsonConfigPath = CurrentDirectory() + L"legacy_presets.json";
+    check("legacy_custom_layout_file", WriteTextFile(gJsonConfigPath, "{\"input\":{\"mode\":\"CUSTOM\",\"lanes\":[\"A\",\"S\",\"K\",\"L\"]}}"));
+    gConfig = Config{};
+    check("legacy_custom_layout_becomes_its_preset", LoadJsonConfig() && gConfig.presetLanes[PresetIndexForCount(4)] == L"A,S,K,L");
+    check("invalid_preset_fixture", WriteTextFile(gJsonConfigPath, "{\"input\":{\"lanes\":[\"D\",\"F\",\"J\",\"K\"],\"preset_5k\":\"D,D,F,J,K\",\"preset_7k\":\"Q,W,E,R\"}}"));
+    gConfig = Config{};
+    check("invalid_or_wrong_count_presets_use_defaults", LoadJsonConfig() &&
+        gConfig.presetLanes[PresetIndexForCount(5)].empty() && gConfig.presetLanes[PresetIndexForCount(7)].empty());
+    gIniConfigPath = CurrentDirectory() + L"legacy_presets.ini";
+    check("legacy_ini_custom_fixture", WriteTextFile(gIniConfigPath,"[input]\nmode=CUSTOM\nlanes=Q,W,E,SPACE,I,O,P\n"));
+    gConfig = Config{}; LoadIniConfig();
+    check("legacy_ini_custom_layout_becomes_its_preset", gConfig.presetLanes[PresetIndexForCount(7)] == L"Q,W,E,SPACE,I,O,P");
+    gJsonConfigPath = presetsJsonPath; gIniConfigPath = presetsIniPath;
+    gConfig = saved; gSavedConfig = saved; RebuildLaneConfig();
+    gUnapplied = gUnsaved = false;
+    FillSettingsControls(gSettingsWnd); SaveConfig();
+    edit(IDC_WIDTH, L"800"); edit(IDC_HEIGHT, L"200");
+    CenterOverlayDraft();
+    MONITORINFO info{sizeof(info), {}, {}, 0};
+    bool centerOk = GetMonitorInfoW(MonitorFromWindow(gSettingsWnd, MONITOR_DEFAULTTONEAREST), &info) &&
+        WindowText(GetDlgItem(gSettingsWnd, IDC_X)) == std::to_wstring(info.rcWork.left + (info.rcWork.right - info.rcWork.left - 800) / 2) &&
+        WindowText(GetDlgItem(gSettingsWnd, IDC_Y)) == std::to_wstring(info.rcWork.top + (info.rcWork.bottom - info.rcWork.top - 200) / 2);
+    check("center_uses_current_monitor", centerOk && SameConfig(gConfig, saved));
+    click(IDC_REVERT);
+    ShowSettingsPage(3);
+    ResetDifficulty(static_cast<int>(gConfig.lanes.size()));
+    for (int i = 0; i < 24; ++i) {
+        RecordDifficultyInput(i % 4, true, i * 125.0);
+        RecordDifficultyInput(i % 4, false, i * 125.0 + 10);
+    }
+    RefreshDifficultyDisplay(3000);
+    check("difficulty_live_settings_display", gDifficultySnapshot.ready && gDifficultySnapshot.samples == 24 &&
+        WindowText(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_SCORE)).find(L"단") != std::wstring::npos &&
+        WindowText(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_PROFILE)) == L"Reform 4K · 분석" &&
+        DifficultyDetails(true).find(L"4K Reform v1  |  참고 ★") != std::wstring::npos);
+    check("large_current_nps_display", WindowText(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_NPS)) == L"NPS  7.0" &&
+        reinterpret_cast<HFONT>(SendDlgItemMessageW(gSettingsWnd, IDC_DIFFICULTY_NPS, WM_GETFONT, 0, 0)) == gHudSmallFont);
+    check("previous_result_not_published_early", !gPatternSummary.Completed().ready);
+    RefreshDifficultyDisplay(6000);
+    check("short_pause_keeps_rating_and_live_nps", !gDifficultySnapshot.idle && gDifficultySnapshot.retained &&
+        gDifficultySnapshot.ready && gDifficultySnapshot.currentNps == 0 && gDifficultySnapshot.nps > 0 && !gPatternSummary.Completed().ready);
+    RefreshDifficultyDisplay(12884);
+    check("session_continues_until_ten_seconds_after_release", !gDifficultySnapshot.idle && !gPatternSummary.Completed().ready);
+    RefreshDifficultyDisplay(12885);
+    const auto completedText = PreviousPatternValue();
+    check("finished_pattern_sentence_visible", gPatternSummary.Completed().ready &&
+        WindowText(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_PREVIOUS)) == completedText &&
+        completedText.find(L"난이도입니다.") != std::wstring::npos &&
+        WindowText(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_NPS)) == L"NPS  0.0");
+    RefreshDifficultyDisplay(15000);
+    check("finished_sentence_stays_when_idle", PreviousPatternValue() == completedText);
+    RECT liveRect{}, previousRect{}, npsRect{};
+    GetWindowRect(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_SCORE), &liveRect);
+    GetWindowRect(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_PREVIOUS), &previousRect);
+    GetWindowRect(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_NPS), &npsRect);
+    check("previous_pattern_between_live_and_nps", liveRect.right < previousRect.left && previousRect.right < npsRect.left);
+    gOverlayWnd = CreateWindowW(L"KeyNoteOverlayCppWindow", L"hidden preview test", WS_POPUP,
+        0, 0, 900, 220, nullptr, nullptr, gInstance, nullptr);
+    const auto beforePreview = gDifficulty.Evaluate(3000);
+    SpawnTestNotes();
+    check("preview_notes_excluded_from_analysis", gOverlayWnd && !gNotes.empty() &&
+        gDifficulty.Evaluate(3000).samples == beforePreview.samples);
+    if (gOverlayWnd) DestroyWindow(gOverlayWnd);
+    gOverlayWnd = nullptr;
+    gNotes.clear();
+    const auto beforeAppearanceApply = gDifficulty.Evaluate(3000).samples;
+    SetEditInt(gSettingsWnd, IDC_OPACITY, 80);
+    check("appearance_apply_keeps_analysis_history", ReadSettingsControls() && gDifficulty.Evaluate(3000).samples == beforeAppearanceApply);
+    SendDlgItemMessageW(gSettingsWnd, IDC_DIFFICULTY_HUD, BM_SETCHECK, BST_UNCHECKED, 0);
+    click(IDC_DIFFICULTY_HUD);
+    check("hud_toggle_is_draft", gUnapplied && gConfig.difficultyHud);
+    check("hud_can_be_hidden_independently", ReadSettingsControls() && !gConfig.difficultyHud &&
+        gConfig.difficultyEnabled && DifficultyHeaderHeight(900, 220) == 0);
+    SendDlgItemMessageW(gSettingsWnd, IDC_DIFFICULTY_HUD, BM_SETCHECK, BST_CHECKED, 0);
+    check("hud_adapts_to_small_overlay", ReadSettingsControls() && DifficultyHeaderHeight(900, 220) == 76 &&
+        DifficultyHeaderHeight(240, 90) == 76 && DifficultyHeaderHeight(600,90) == 56);
+    SendDlgItemMessageW(gSettingsWnd, IDC_DIFFICULTY_ENABLED, BM_SETCHECK, BST_UNCHECKED, 0);
+    bool disabled = ReadSettingsControls();
+    RecordDifficultyInput(0, true, 4000);
+    check("disabled_analysis_ignores_inputs", disabled && !gConfig.difficultyEnabled && gDifficulty.BufferedEvents() == 0 && DifficultyHeaderHeight(900, 220) == 0);
+    check("difficulty_settings_save", SaveSettings());
+    Config savedDifficulty = gConfig;
+    gConfig = Config{};
+    check("difficulty_json_roundtrip", LoadJsonConfig() && !gConfig.difficultyEnabled && gConfig.difficultyHud);
+    gConfig = Config{};
+    LoadIniConfig();
+    check("difficulty_ini_roundtrip", !gConfig.difficultyEnabled && gConfig.difficultyHud);
+    const auto originalJsonPath = gJsonConfigPath;
+    const auto originalIniPath = gIniConfigPath;
+    gJsonConfigPath = CurrentDirectory() + L"legacy_difficulty.json";
+    gIniConfigPath = CurrentDirectory() + L"legacy_difficulty.ini";
+    bool legacyJsonWritten = WriteTextFile(gJsonConfigPath, "{\"overlay\":{\"width\":640},\"input\":{\"lanes\":[\"D\",\"F\",\"J\",\"K\"]}}");
+    gConfig = Config{};
+    check("legacy_json_uses_difficulty_defaults", legacyJsonWritten && LoadJsonConfig() && gConfig.width == 640 && gConfig.difficultyEnabled && gConfig.difficultyHud);
+    bool legacyIniWritten = WriteTextFile(gIniConfigPath, "[overlay]\nwidth=640\n[input]\nlanes=D,F,J,K\n");
+    gConfig = Config{};
+    LoadIniConfig();
+    check("legacy_ini_uses_difficulty_defaults", legacyIniWritten && gConfig.width == 640 && gConfig.difficultyEnabled && gConfig.difficultyHud);
+    gJsonConfigPath = originalJsonPath;
+    gIniConfigPath = originalIniPath;
+    gConfig = savedDifficulty;
+    FillSettingsControls(gSettingsWnd);
+    SendDlgItemMessageW(gSettingsWnd, IDC_DIFFICULTY_ENABLED, BM_SETCHECK, BST_CHECKED, 0);
+    check("reenable_starts_fresh", ReadSettingsControls() && gConfig.difficultyEnabled && gDifficulty.BufferedEvents() == 0);
+    RecordDifficultyInput(0, true, 5000);
+    RecordDifficultyInput(0, false, 5010);
+    BeginKeyCapture(CaptureMode::Sequence);
+    RecordDifficultyInput(1, true, 5200);
+    check("layout_recording_excluded_from_analysis", gDifficulty.BufferedEvents() == 0);
+    EndKeyCapture(true);
+    ShowSettingsPage(3);
+    RecordDifficultyInput(0, true, 6000);
+    click(IDC_DIFFICULTY_RESET);
+    check("difficulty_reset_button", gDifficulty.BufferedEvents() == 0 && gDifficultySnapshot.idle && !gPatternSummary.Completed().ready);
+    RecordDifficultyInput(0, true, 7000);
+    RecordDifficultyInput(0, false, 7010);
+    edit(IDC_LANES, L"A,S,D,F,J,K,L,SEMICOLON");
+    check("layout_change_resets_analysis", ReadSettingsControls() && gDifficulty.BufferedEvents() == 0);
+
+    // Per-key drafts are independent of lane order, theme, and inactive presets.
+    const Config beforeStyleTests = gConfig;
+    const Config savedBeforeStyles = gSavedConfig;
+    auto selectStyle = [&](UINT vk) {
+        HWND list = GetDlgItem(gSettingsWnd, IDC_STYLE_KEYS);
+        const int count = static_cast<int>(SendMessageW(list, LB_GETCOUNT, 0, 0));
+        for (int i=0; i<count; ++i) if (static_cast<UINT>(SendMessageW(list, LB_GETITEMDATA, i, 0)) == vk) {
+            SendMessageW(list, LB_SETCURSEL, i, 0);
+            SendMessageW(gSettingsWnd, WM_COMMAND, MAKEWPARAM(IDC_STYLE_KEYS,LBN_SELCHANGE), reinterpret_cast<LPARAM>(list));
+            return true;
+        }
+        return false;
+    };
+    COLORREF parsedColor = 0;
+    check("key_color_hex_validation", ParseColor(L"#aB12EF",parsedColor) && parsedColor==RGB(171,18,239) &&
+        !ParseColor(L"#12345Z",parsedColor) && !ParseColor(L"#123",parsedColor) &&
+        ParseColor(L"",parsedColor) && parsedColor==CLR_INVALID);
+    edit(IDC_LANES,L"D,F,J,K"); selectStyle('D');
+    edit(IDC_KEY_COLOR,L"#FF0000"); edit(IDC_KEY_OPACITY,L"50"); selectStyle('F');
+    edit(IDC_KEY_COLOR,L"#00FF00"); edit(IDC_KEY_OPACITY,L"0"); selectStyle('D');
+    check("key_style_independent_drafts", gStyleVk=='D' && WindowText(GetDlgItem(gSettingsWnd,IDC_KEY_COLOR))==L"#FF0000" &&
+        WindowText(GetDlgItem(gSettingsWnd,IDC_KEY_OPACITY))==L"50" && gConfig.keyStyles['D'].color==CLR_INVALID);
+    edit(IDC_KEY_COLOR,L"#BAD"); selectStyle('F');
+    Config invalidStyle;
+    check("invalid_key_color_survives_selection_and_blocks_apply", !BuildSettingsCandidate(invalidStyle,false) && gDraftKeyStyles['D'].color==L"#BAD");
+    selectStyle('D'); edit(IDC_KEY_COLOR,L"#FF0000"); edit(IDC_KEY_OPACITY,L"101");
+    check("invalid_key_opacity_blocks_apply", !BuildSettingsCandidate(invalidStyle,false));
+    edit(IDC_KEY_OPACITY,L"50"); click(IDC_VIS_NEON);
+    check("theme_preserves_key_styles", gDraftKeyStyles['D'].color==L"#FF0000" && gDraftKeyStyles['F'].opacity==L"0");
+    edit(IDC_LANES,L"F,D,J,K");
+    check("key_style_apply_and_reorder", ReadSettingsControls() && LaneColor(1)==RGB(255,0,0) &&
+        gConfig.keyStyles[gConfig.lanes[0].vk].opacity==0);
+    selectPreset(10); selectPreset(4);
+    check("key_style_preset_switch", gDraftKeyStyles['D'].color==L"#FF0000" && gDraftKeyStyles['D'].opacity==L"50");
+    check("key_style_save", SaveSettings());
+    const Config stylesSaved = gSavedConfig;
+    gConfig=Config{};
+    check("key_style_json_reload", LoadJsonConfig() && (ClampAndRebuildConfig(), SameConfig(gConfig,stylesSaved)));
+    gConfig=Config{}; LoadIniConfig(); ClampAndRebuildConfig();
+    check("key_style_ini_reload", SameConfig(gConfig,stylesSaved));
+    bool specialStyleKeys = true;
+    for (UINT vk : {static_cast<UINT>(VK_ESCAPE),static_cast<UINT>(VK_SHIFT),static_cast<UINT>(VK_CONTROL),static_cast<UINT>(VK_MENU),
+        static_cast<UINT>(VK_OEM_COMMA),static_cast<UINT>(VK_LSHIFT),static_cast<UINT>(VK_RSHIFT),static_cast<UINT>(VK_NUMPAD9)}) {
+        UINT decoded=0; std::wstring label;
+        specialStyleKeys = specialStyleKeys && !TokenFromVk(vk).empty() && TokenToVk(TokenFromVk(vk),decoded,label) && decoded==vk;
+    }
+    check("special_keys_have_persistent_style_names", specialStyleKeys);
+    FillSettingsControls(gSettingsWnd); selectStyle('D'); click(IDC_RESET_KEY_STYLE);
+    check("key_style_reset_selected_only", gDraftKeyStyles['D'].color.empty() && gDraftKeyStyles['D'].opacity==L"100" && gDraftKeyStyles['F'].opacity==L"0");
+    click(IDC_REVERT);
+    check("key_style_revert", gDraftKeyStyles['D'].color==L"#FF0000" && gDraftKeyStyles['D'].opacity==L"50");
+    const auto styleJsonPath = gJsonConfigPath;
+    gJsonConfigPath=CurrentDirectory()+L"legacy_key_styles.json";
+    WriteTextFile(gJsonConfigPath,"{\"input\":{\"lanes\":[\"D\",\"F\",\"J\",\"K\"]}}");
+    check("legacy_key_styles_default_palette", LoadJsonConfig() && gConfig.keyStyles['D'].color==CLR_INVALID && gConfig.keyStyles['D'].opacity==100);
+    WriteTextFile(gJsonConfigPath,"{\"key_styles\":{\"key_color_D\":\"#oops\",\"key_opacity_D\":-20,\"key_opacity_F\":900}}");
+    check("malformed_saved_styles_safe", LoadJsonConfig() && gConfig.keyStyles['D'].color==CLR_INVALID &&
+        gConfig.keyStyles['D'].opacity==0 && gConfig.keyStyles['F'].opacity==100);
+    gJsonConfigPath=styleJsonPath;
+
+    // Render our own pixels. No desktop capture or physical input is involved.
+    gConfig=Config{}; gConfig.lanesText=L"D,F,J,K"; RebuildLaneConfig();
+    gConfig.difficultyHud=gConfig.debugBackground=gConfig.laneBackground=false;
+    overlay::AlphaSurface frame(900,220);
+    Note sample; sample.lane=0; sample.label=L"D"; sample.pressMs=1000; sample.opacity=50; sample.color=RGB(255,0,0);
+    gNotes={sample};
+    auto hasPixel = [&](DWORD pixel) { return std::find(frame.pixels,frame.pixels+900*220,pixel)!=frame.pixels+900*220; };
+    auto onlyAlpha = [&](unsigned alpha) { return std::all_of(frame.pixels,frame.pixels+900*220,[&](DWORD pixel) { return pixel==0 || pixel>>24==alpha; }); };
+    check("key_opacity_real_alpha_50", RenderOverlay(frame,1100) && hasPixel(0x7f7f0000) && onlyAlpha(127) && frame.pixels[0]==0);
+    gNotes[0].opacity=0;
+    check("key_opacity_zero_hides_entire_note", RenderOverlay(frame,1100) && onlyAlpha(0));
+    gNotes[0].opacity=100; gNotes[0].color=kTransparentKey;
+    check("custom_color_can_equal_old_transparency_key", RenderOverlay(frame,1100) && hasPixel(0xff010203) && onlyAlpha(255));
+    gNotes[0].color=RGB(0,0,0);
+    check("custom_black_is_visible", RenderOverlay(frame,1100) && hasPixel(0xff000000));
+    gNotes={sample,sample};
+    check("overlapping_notes_alpha_composite", RenderOverlay(frame,1100) && hasPixel(0xbfbf0000u));
+    gNotes={sample}; gConfig.debugBackground=true;
+    check("key_opacity_over_opaque_background", RenderOverlay(frame,1100) && onlyAlpha(255));
+    gConfig.debugBackground=false; gConfig.circleNotes=true;
+    check("circle_note_alpha", RenderOverlay(frame,1100) && hasPixel(0x7f7f0000) && onlyAlpha(127));
+    gConfig.circleNotes=false;
+    gNotes[0].held=false; gNotes[0].releaseMs=1500;
+    check("released_long_note_alpha", RenderOverlay(frame,1600) && hasPixel(0x7f7f0000) && onlyAlpha(127));
+    gNotes[0].opacity=0;
+    check("released_long_note_zero_hides_shadow_and_text", RenderOverlay(frame,1600) && onlyAlpha(0));
+    gNotes={sample}; gConfig.difficultyHud=true;
+    check("key_opacity_does_not_fade_hud", RenderOverlay(frame,1100) && frame.pixels[10*900+10]>>24==255 && hasPixel(0x7f7f0000));
+    HWND alphaWindow = CreateWindowExW(WS_EX_LAYERED|WS_EX_TOOLWINDOW,L"KeyNoteOverlayCppWindow",L"hidden alpha test",WS_POPUP,
+        0,0,900,220,nullptr,nullptr,gInstance,nullptr);
+    check("native_layered_alpha_present", alphaWindow && PresentOverlay(alphaWindow,frame) && !IsWindowVisible(alphaWindow));
+    gConfig.opacityPercent=50;
+    check("native_global_alpha_with_per_key_alpha", PresentOverlay(alphaWindow,frame));
+    const HWND previousOverlay = gOverlayWnd;
+    gOverlayWnd=alphaWindow; gNotes.clear();
+    gConfig.keyStyles['D']={RGB(250,60,90),37};
+    BeginLaneHold(0);
+    check("physical_note_uses_selected_key_style", gNotes.size()==1 && gNotes[0].color==RGB(250,60,90) && gNotes[0].opacity==37);
+    gNotes.clear(); SpawnTapNote(0);
+    check("test_note_uses_selected_key_style", gNotes.size()==1 && gNotes[0].color==RGB(250,60,90) && gNotes[0].opacity==37);
+    gOverlayWnd=previousOverlay;
+    if (alphaWindow) DestroyWindow(alphaWindow);
+
+    // A deterministic full overlay preview is exported from the same renderer.
+    gConfig.opacityPercent=100; gConfig.difficultyHud=false; gNotes.clear();
+    for (int i=0;i<4;++i) {
+        sample.lane=i; sample.label=gConfig.lanes[i].label; sample.opacity=100-i*25;
+        sample.color=i==0?RGB(255,70,100):i==1?RGB(70,220,255):i==2?RGB(160,100,255):RGB(255,210,70);
+        sample.pressMs=1000-i*100; gNotes.push_back(sample);
+    }
+    RenderOverlay(frame,1400);
+    BITMAPINFOHEADER alphaHeader{};
+    alphaHeader.biSize=sizeof(alphaHeader); alphaHeader.biWidth=900; alphaHeader.biHeight=-220;
+    alphaHeader.biPlanes=1; alphaHeader.biBitCount=32;
+    BITMAPFILEHEADER alphaFile{}; alphaFile.bfType=0x4d42; alphaFile.bfOffBits=sizeof(alphaFile)+sizeof(alphaHeader);
+    alphaFile.bfSize=alphaFile.bfOffBits+900*220*4;
+    std::string alphaBytes(reinterpret_cast<char*>(&alphaFile),sizeof(alphaFile));
+    alphaBytes.append(reinterpret_cast<char*>(&alphaHeader),sizeof(alphaHeader));
+    alphaBytes.append(reinterpret_cast<char*>(frame.pixels),900*220*4);
+    check("key_style_offscreen_preview", WriteTextFile(CurrentDirectory()+L"key-styles-alpha.bmp",alphaBytes));
+    gNotes.clear(); gConfig=beforeStyleTests; gSavedConfig=savedBeforeStyles;
+    RebuildLaneConfig(); FillSettingsControls(gSettingsWnd); gUnapplied=false; gUnsaved=!SameConfig(gConfig,gSavedConfig);
+
+    bool pagesOk = true, boundsOk = true;
+    for (int i = 0; i < static_cast<int>(gPageControls.size()); ++i) {
+        ShowSettingsPage(i);
+        for (size_t page = 0; page < gPageControls.size(); ++page) for (HWND control : gPageControls[page]) {
+            pagesOk = pagesOk && (((GetWindowLongPtrW(control, GWL_STYLE) & WS_VISIBLE) != 0) == (static_cast<int>(page) == i));
+            RECT rect{}; GetWindowRect(control, &rect);
+            MapWindowPoints(nullptr, gSettingsWnd, reinterpret_cast<POINT*>(&rect), 2);
+            boundsOk = boundsOk && rect.left >= 18 && rect.top >= 78 && rect.right <= 702 && rect.bottom <= 480;
+        }
+    }
+    check("tab_page_visibility", pagesOk);
+    check("page_controls_within_bounds", boundsOk);
+    bool textFits = true;
+    HDC measureDc = GetDC(gSettingsWnd);
+    HGDIOBJ previousFont = SelectObject(measureDc, gGuiFont);
+    const auto savedSnapshot = gDifficultySnapshot;
+    bool hudFits = true, ratingTextOk = true;
+    // Measure the actual formatted values against the smallest supported HUD card.
+    // Captions may ellipsize; the difficulty and NPS numbers must remain complete.
+    SelectObject(measureDc, gHudSmallFont);
+    for (auto profile : {pattern::RatingProfile::Osu4, pattern::RatingProfile::Osu7, pattern::RatingProfile::Osu8, pattern::RatingProfile::Osu10,
+        pattern::RatingProfile::Aery5, pattern::RatingProfile::Generic}) {
+        gDifficultySnapshot = {};
+        gDifficultySnapshot.idle = false;
+        gDifficultySnapshot.ready = true;
+        gDifficultySnapshot.profile = profile;
+        gDifficultySnapshot.rating = 24.6;
+        gDifficultySnapshot.stars = 4.697745;
+        gDifficultySnapshot.score = 100;
+        const bool bms = profile == pattern::RatingProfile::Aery5;
+        gDifficultySnapshot.outsideCalibration = bms ? 1 : 0;
+        const auto value = DifficultyValue();
+        SelectObject(measureDc, FitDifficultyFont(measureDc, value, 108, gHudSmallFont));
+        RECT needed{0,0,108,31};
+        DrawTextW(measureDc, value.c_str(), -1, &needed, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+        hudFits = hudFits && needed.right <= 108 && needed.bottom <= 31;
+        if (profile == pattern::RatingProfile::Aery5) ratingTextOk = ratingTextOk && value == L">⑤24.6";
+        if (profile == pattern::RatingProfile::Osu8) ratingTextOk = ratingTextOk && value.find(L"단") != std::wstring::npos && value.find(L"★") == std::wstring::npos;
+    }
+    bool danFits = true;
+    for (auto profile : {pattern::RatingProfile::Osu4, pattern::RatingProfile::Osu7, pattern::RatingProfile::Osu8, pattern::RatingProfile::Osu10}) {
+        for (int sample = 0; sample <= 400; ++sample) {
+            const auto value = pattern::FormatDan(profile, pattern::EstimateDan(profile, sample * (profile == pattern::RatingProfile::Osu10 ? 0.075 : 0.025)));
+            for (int available : {105, 138, 208}) {
+                SelectObject(measureDc, FitDifficultyFont(measureDc, value, available, gHudSmallFont));
+                SIZE size{}; GetTextExtentPoint32W(measureDc, value.c_str(), static_cast<int>(value.size()), &size);
+                if (size.cx > available && danFits) log << "dan_width=" << sample << "," << size.cx << ",available=" << available << "\n";
+                danFits = danFits && size.cx <= available && size.cy <= 31;
+            }
+            const auto sentence = value + L"의 난이도입니다."; // longest neutral form
+            SetDifficultyText(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_SCORE), value);
+            SetDifficultyText(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_PREVIOUS), sentence);
+            for (int id : {IDC_DIFFICULTY_SCORE, IDC_DIFFICULTY_PREVIOUS}) {
+                HWND control = GetDlgItem(gSettingsWnd, id);
+                SelectObject(measureDc, reinterpret_cast<HFONT>(SendMessageW(control, WM_GETFONT, 0, 0)));
+                RECT bounds{}; GetClientRect(control, &bounds);
+                RECT needed = bounds;
+                auto text = WindowText(control);
+                DrawTextW(measureDc, text.c_str(), -1, &needed, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+                danFits = danFits && needed.right <= bounds.right && needed.bottom <= bounds.bottom;
+            }
+            SelectObject(measureDc, gHudLabelFont);
+            SIZE size{}; GetTextExtentPoint32W(measureDc, sentence.c_str(), static_cast<int>(sentence.size()), &size);
+            if (size.cx > 226 && danFits) log << "dan_sentence_width=" << sample << "," << size.cx << "\n";
+            danFits = danFits && size.cx <= 226 && size.cy * 2 <= 27;
+        }
+    }
+    check("dan_heights_and_ranges_fit_all_cards", danFits);
+    SelectObject(measureDc, gHudSmallFont);
+    RECT npsNeeded{0,0,108,31};
+    DrawTextW(measureDc, L"4096.0", -1, &npsNeeded, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+    check("hud_numbers_fit_minimum_width", hudFits && npsNeeded.right <= 108 && npsNeeded.bottom <= 31);
+    check("table_units_and_range_markers", ratingTextOk);
+    gDifficultySnapshot.profile = pattern::RatingProfile::Aery5;
+    gDifficultySnapshot.ratingError = 2.3;
+    SetDifficultyText(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_SCORE), DifficultyValue());
+    SetWindowTextW(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_METRICS), DifficultyDetails(true).c_str());
+    SetWindowTextW(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_NPS), L"NPS  4096.0");
+    SetDifficultyText(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_PREVIOUS), L">⑤24.6 난이도입니다.");
+    for (const auto& page : gPageControls) for (HWND control : page) {
+        wchar_t className[32]{};
+        GetClassNameW(control, className, 32);
+        if (std::wstring(className) != L"STATIC" && std::wstring(className) != L"BUTTON") continue;
+        HFONT controlFont = reinterpret_cast<HFONT>(SendMessageW(control, WM_GETFONT, 0, 0));
+        SelectObject(measureDc, controlFont ? controlFont : gGuiFont);
+        RECT available{}; GetClientRect(control, &available);
+        RECT needed = available;
+        if (std::wstring(className) == L"BUTTON") needed.right -= 24;
+        auto label = WindowText(control);
+        DrawTextW(measureDc, label.c_str(), -1, &needed, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+        if (needed.bottom > available.bottom || needed.right > available.right) {
+            textFits = false;
+            log << "text_overflow_control=" << GetDlgCtrlID(control) << "\n";
+        }
+    }
+    SelectObject(measureDc, previousFont);
+    ReleaseDC(gSettingsWnd, measureDc);
+    check("settings_text_fits_at_default_scale", textFits);
+    // Render our own HUD into an off-screen bitmap for layout inspection. This
+    // never captures the desktop, installs a hook, or sends keyboard input.
+    const auto savedSummary = gPatternSummary;
+    gPatternSummary.Reset();
+    auto example = gDifficultySnapshot;
+    example.rating = 12.3; example.outsideCalibration = 0;
+    gPatternSummary.Observe(example); gPatternSummary.Observe(pattern::Snapshot{});
+    gDifficultySnapshot.rating = 10.8;
+    gDifficultySnapshot.outsideCalibration = 0;
+    gDifficultySnapshot.currentNps = 48.0;
+    auto renderHud = [&](int width, int height, const wchar_t* name) {
+        BITMAPINFO info{};
+        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = width; info.bmiHeader.biHeight = -height;
+        info.bmiHeader.biPlanes = 1; info.bmiHeader.biBitCount = 32; info.bmiHeader.biCompression = BI_RGB;
+        void* pixels = nullptr;
+        HDC dc = CreateCompatibleDC(nullptr);
+        HBITMAP bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+        bool ok = dc && bitmap && pixels;
+        if (ok) {
+            HGDIOBJ oldBitmap = SelectObject(dc, bitmap);
+            DrawDifficultyHud(dc, width, height);
+            GdiFlush();
+            BITMAPFILEHEADER header{};
+            header.bfType = 0x4d42;
+            header.bfOffBits = sizeof(header) + sizeof(info.bmiHeader);
+            header.bfSize = header.bfOffBits + width * height * 4;
+            std::string bytes(reinterpret_cast<const char*>(&header), sizeof(header));
+            bytes.append(reinterpret_cast<const char*>(&info.bmiHeader), sizeof(info.bmiHeader));
+            bytes.append(static_cast<const char*>(pixels), width * height * 4);
+            ok = WriteTextFile(CurrentDirectory() + name, bytes);
+            SelectObject(dc, oldBitmap);
+        }
+        if (bitmap) DeleteObject(bitmap);
+        if (dc) DeleteDC(dc);
+        return ok;
+    };
+    check("hud_offscreen_layout_render", renderHud(900,76,L"hud-wide.bmp") && renderHud(240,76,L"hud-compact.bmp") && renderHud(600,56,L"hud-low.bmp"));
+    const auto previewLanes = gConfig.lanes;
+    gConfig.lanes.resize(4);
+    gDifficultySnapshot.profile = pattern::RatingProfile::Osu4;
+    gDifficultySnapshot.stars = 4.68;
+    gDifficultySnapshot.ratingError = 0;
+    gPatternSummary.Reset();
+    gPatternSummary.Observe(gDifficultySnapshot); gPatternSummary.Observe(pattern::Snapshot{});
+    check("dan_completed_height_matches_live", PreviousPatternValue() == L"8~9단 mid low 난이도입니다.");
+    check("dan_hud_offscreen_layout_render", renderHud(900,76,L"hud-dan-wide.bmp") &&
+        renderHud(240,76,L"hud-dan-compact.bmp") && renderHud(600,56,L"hud-dan-low.bmp"));
+    gConfig.lanes.resize(8);
+    gDifficultySnapshot.profile = pattern::RatingProfile::Osu8;
+    gDifficultySnapshot.stars = 8.147425; // Life/Oblatus pooled band.
+    gPatternSummary.Reset();
+    gPatternSummary.Observe(gDifficultySnapshot); gPatternSummary.Observe(pattern::Snapshot{});
+    gDifficultySnapshot.stars = 8.8; // Demise mid low.
+    check("8k_live_and_completed_use_dan_labels", DifficultyValue() == L"Demise단 mid low" &&
+        PreviousPatternValue() == L"13~14단 수준의 난이도입니다.");
+    check("8k_hud_offscreen_layout_render", renderHud(900,76,L"hud-8k-wide.bmp") &&
+        renderHud(240,76,L"hud-8k-compact.bmp") && renderHud(600,56,L"hud-8k-low.bmp"));
+    gConfig.lanes.resize(10);
+    gDifficultySnapshot.profile = pattern::RatingProfile::Osu10;
+    gDifficultySnapshot.stars = 5.58939;
+    gDifficultySnapshot.rating = 16.3659; // Revive 2026 Dan 10 reference.
+    gPatternSummary.Reset();
+    gPatternSummary.Observe(gDifficultySnapshot); gPatternSummary.Observe(pattern::Snapshot{});
+    gDifficultySnapshot.stars = 5.23186;
+    gDifficultySnapshot.rating = 22.7947;
+    check("10k_live_and_completed_use_revive_dans", DifficultyProfileName() == L"Revive 10K" &&
+        DifficultyValue() == L"개전 수준" && PreviousPatternValue() == L"10단 수준의 난이도입니다.");
+    gDifficultySnapshot.rating = 25.668;
+    check("10k_overjoy_label", DifficultyValue() == L"오버조이 수준");
+    check("10k_revive_hud_offscreen_layout_render", renderHud(900,76,L"hud-10k-revive-wide.bmp") &&
+        renderHud(240,76,L"hud-10k-revive-compact.bmp") && renderHud(600,56,L"hud-10k-revive-low.bmp"));
+    gConfig.lanes = previewLanes;
+    gPatternSummary = savedSummary;
+    gDifficultySnapshot = savedSnapshot;
+    // Hidden native windows exercise movement and real position-only persistence,
+    // without injecting mouse input or changing the user's desktop configuration.
+    const Config beforePositionTests = gConfig;
+    gConfig.clickThrough = true;
+    gConfig.debugBackground = false;
+    FillSettingsControls(gSettingsWnd);
+    check("position_initial_save", SaveSettings());
+    const Config positionBaseline = gSavedConfig;
+    gOverlayWnd = CreateWindowW(L"KeyNoteOverlayCppWindow", L"position test", WS_POPUP,
+        gConfig.x, gConfig.y, gConfig.width, gConfig.height, nullptr, nullptr, gInstance, nullptr);
+    ApplyOverlayWindowStyle();
+    const Config beforeInitialPlacement = gConfig;
+    check("startup_settings_placement_without_changing_overlay", PlaceInitialSettingsWindow() &&
+        SameConfig(gConfig, beforeInitialPlacement) && !IsWindowVisible(gSettingsWnd) && !IsWindowVisible(gOverlayWnd));
+    check("position_starts_click_through", IsWindow(gOverlayWnd) && !gMoveMode &&
+        !IsWindowVisible(gOverlayWnd) && (GetWindowLongPtrW(gOverlayWnd, GWL_EXSTYLE) & WS_EX_TRANSPARENT) &&
+        SendMessageW(gOverlayWnd, WM_NCHITTEST, 0, 0) == HTTRANSPARENT);
+    SetWindowPos(gOverlayWnd, nullptr, -345, -67, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    SendMessageW(gOverlayWnd, WM_EXITSIZEMOVE, 0, 0);
+    check("programmatic_move_does_not_save", SameConfig(gConfig, positionBaseline) && SameConfig(gSavedConfig, positionBaseline));
+    click(IDC_MOVE_MODE);
+    check("move_mode_overrides_click_through_temporarily", gMoveMode && gConfig.clickThrough && !gConfig.debugBackground &&
+        !(GetWindowLongPtrW(gOverlayWnd, GWL_EXSTYLE) & WS_EX_TRANSPARENT) &&
+        SendMessageW(gOverlayWnd, WM_NCHITTEST, 0, 0) == HTCAPTION && !IsWindowVisible(gOverlayWnd));
+    // One applied, unsaved value plus independent, invalid draft values.
+    gConfig.opacityPercent = gConfig.opacityPercent == 72 ? 73 : 72;
+    FillSettingsControls(gSettingsWnd);
+    edit(IDC_WIDTH, L"invalid draft");
+    edit(IDC_LANES, L"Q,W,E,R");
+    click(IDC_VIS_NEON);
+    const auto positionDraftPresets = gDraftPresetLanes;
+    const int positionActiveOpacity = gConfig.opacityPercent;
+    auto dragTo = [&](int x, int y) {
+        SendMessageW(gOverlayWnd, WM_ENTERSIZEMOVE, 0, 0);
+        SetWindowPos(gOverlayWnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        SendMessageW(gOverlayWnd, WM_EXITSIZEMOVE, 0, 0);
+    };
+    dragTo(-345, -67);
+    check("drag_saves_negative_coordinates", gConfig.x == -345 && gConfig.y == -67 && gSavedConfig.x == -345 &&
+        gSavedConfig.y == -67 && WindowText(GetDlgItem(gSettingsWnd, IDC_X)) == L"-345" &&
+        WindowText(GetDlgItem(gSettingsWnd, IDC_Y)) == L"-67");
+    check("drag_preserves_active_and_invalid_drafts", gConfig.opacityPercent == positionActiveOpacity &&
+        gSavedConfig.opacityPercent == positionBaseline.opacityPercent && gUnapplied && gUnsaved &&
+        WindowText(GetDlgItem(gSettingsWnd, IDC_WIDTH)) == L"invalid draft" && raw() == L"Q,W,E,R" &&
+        gDraftVisualPreset == L"Neon" && gDraftPresetLanes == positionDraftPresets);
+    const Config positionActive = gConfig;
+    gConfig = Config{};
+    const bool positionJsonLoaded = LoadJsonConfig();
+    ClampAndRebuildConfig();
+    check("position_json_restores_without_saving_other_edits", positionJsonLoaded && SameConfig(gConfig, gSavedConfig));
+    gConfig = Config{}; LoadIniConfig(); ClampAndRebuildConfig();
+    check("position_ini_restores_without_saving_other_edits", SameConfig(gConfig, gSavedConfig));
+    gConfig = positionActive; RebuildLaneConfig();
+    HANDLE positionLock = CreateFileW(gJsonConfigPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const Config positionCommitted = gSavedConfig;
+    SetStatus(L"no save expected");
+    dragTo(-345, -67);
+    check("stationary_drag_does_not_save", WindowText(GetDlgItem(gSettingsWnd, IDC_STATUS)) == L"no save expected");
+    SendMessageW(gOverlayWnd, WM_ENTERSIZEMOVE, 0, 0);
+    SetWindowPos(gOverlayWnd, nullptr, 99, 88, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(gOverlayWnd, nullptr, -345, -67, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    SendMessageW(gOverlayWnd, WM_EXITSIZEMOVE, 0, 0);
+    check("cancelled_move_does_not_save", WindowText(GetDlgItem(gSettingsWnd, IDC_STATUS)) == L"no save expected");
+    dragTo(-222, 111);
+    check("position_save_failure_retains_committed_position", positionLock != INVALID_HANDLE_VALUE &&
+        SameConfig(gSavedConfig, positionCommitted) && gConfig.x == -222 && gConfig.y == 111 && gUnsaved &&
+        WindowText(GetDlgItem(gSettingsWnd, IDC_STATUS)).find(L"위치 저장 실패") != std::wstring::npos);
+    if (positionLock != INVALID_HANDLE_VALUE) CloseHandle(positionLock);
+    click(IDC_SAVE_POSITION);
+    check("position_retry_ignores_unrelated_invalid_draft", gSavedConfig.x == -222 && gSavedConfig.y == 111 &&
+        gSavedConfig.opacityPercent == positionBaseline.opacityPercent && raw() == L"Q,W,E,R" && gUnapplied);
+    edit(IDC_X, L"bad x");
+    check("position_invalid_coordinate_rejected", !SavePositionDraft() && gConfig.x == -222 && gSavedConfig.x == -222);
+    edit(IDC_X, L"456"); edit(IDC_Y, L"234"); click(IDC_SAVE_POSITION);
+    RECT movedRect{}; GetWindowRect(gOverlayWnd, &movedRect);
+    check("position_button_moves_and_saves_only_coordinates", movedRect.left == 456 && movedRect.top == 234 &&
+        gSavedConfig.x == 456 && gSavedConfig.y == 234 && gSavedConfig.width == positionBaseline.width && gUnapplied);
+    SendMessageW(gSettingsWnd, WM_COMMAND, ID_TRAY_MOVE, 0);
+    check("tray_move_toggle_restores_click_through", !gMoveMode && gConfig.clickThrough && !gConfig.debugBackground &&
+        (GetWindowLongPtrW(gOverlayWnd, GWL_EXSTYLE) & WS_EX_TRANSPARENT) &&
+        SendMessageW(gOverlayWnd, WM_NCHITTEST, 0, 0) == HTTRANSPARENT);
+    gConfig.clickThrough = false; ApplyOverlayWindowStyle();
+    check("non_click_through_overlay_is_directly_draggable", SendMessageW(gOverlayWnd, WM_NCHITTEST, 0, 0) == HTCAPTION);
+    using Game = game_overlay::Game;
+    check("game_executable_names_exact_and_case_insensitive",
+        game_overlay::FromExecutable(L"C:\\Games\\OSU!.EXE") == Game::Osu &&
+        game_overlay::FromExecutable(L"osu.exe") == Game::Osu &&
+        game_overlay::FromExecutable(L"C:/Games/Qwilight.exe") == Game::Qwilight &&
+        game_overlay::FromExecutable(L"not-osu!.exe") == Game::None &&
+        game_overlay::FromExecutable(L"Qwilight.exe.backup") == Game::None &&
+        game_overlay::FromExecutable(L"Quaver.exe") == Game::None);
+    check("game_input_policy", !game_overlay::AllowsInput(true, Game::None, false) &&
+        game_overlay::AllowsInput(true, Game::Osu, false) && game_overlay::AllowsInput(true, Game::Qwilight, false) &&
+        game_overlay::AllowsInput(true, Game::None, true) && game_overlay::AllowsInput(false, Game::None, false));
+    check("game_classifier_ignores_missing_and_own_window",
+        gForegroundClassifier.Identify(nullptr) == Game::None && gForegroundClassifier.Identify(gSettingsWnd) == Game::None);
+    FillSettingsControls(gSettingsWnd);
+    SendDlgItemMessageW(gSettingsWnd, IDC_GAME_OVERLAY, BM_SETCHECK, BST_CHECKED, 0);
+    click(IDC_GAME_OVERLAY);
+    check("game_checkbox_is_draft", !gConfig.gameOverlay && gUnapplied);
+    check("game_apply_and_save", SaveSettings() && gConfig.gameOverlay && gConfig.clickThrough &&
+        gConfig.alwaysOnTop && !gConfig.debugBackground);
+    const Config gameSaved = gConfig;
+    gConfig = Config{};
+    check("game_json_roundtrip", LoadJsonConfig() && (ClampAndRebuildConfig(), SameConfig(gConfig, gameSaved)));
+    gConfig = Config{}; LoadIniConfig(); ClampAndRebuildConfig();
+    check("game_ini_roundtrip", SameConfig(gConfig, gameSaved));
+    gConfig.clickThrough = gConfig.alwaysOnTop = false;
+    ApplyOverlayWindowStyle();
+    const auto gameStyle = GetWindowLongPtrW(gOverlayWnd, GWL_EXSTYLE);
+    check("game_window_forces_topmost_clickthrough_noactivate", !IsWindowVisible(gOverlayWnd) &&
+        (gameStyle & WS_EX_TOPMOST) && (gameStyle & WS_EX_TRANSPARENT) && (gameStyle & WS_EX_NOACTIVATE) &&
+        (gameStyle & WS_EX_APPWINDOW) && !(gameStyle & WS_EX_TOOLWINDOW) &&
+        SendMessageW(gOverlayWnd, WM_NCHITTEST, 0, 0) == HTTRANSPARENT &&
+        SendMessageW(gOverlayWnd, WM_MOUSEACTIVATE, 0, 0) == MA_NOACTIVATE);
+    DWORD captureAffinity = WDA_NONE;
+    check("game_overlay_is_not_excluded_from_capture", GetWindowDisplayAffinity(gOverlayWnd, &captureAffinity) && captureAffinity == WDA_NONE);
+    ToggleOverlayMoveMode();
+    check("game_move_preview_is_draggable", gMoveMode && !(GetWindowLongPtrW(gOverlayWnd, GWL_EXSTYLE) & WS_EX_TRANSPARENT) &&
+        SendMessageW(gOverlayWnd, WM_NCHITTEST, 0, 0) == HTCAPTION);
+    ToggleOverlayMoveMode();
+    const auto gameTime = NowMs();
+    RefreshGameOverlay(Game::Osu, gameTime);
+    gKeyDown[static_cast<UINT>(L'D')] = true;
+    gDifficulty.KeyDown(0, gameTime);
+    RefreshGameOverlay(Game::None, gameTime + 1);
+    check("game_focus_loss_closes_held_notes", !gKeyDown[static_cast<UINT>(L'D')] && !gDifficulty.IsHeld(0) &&
+        gNotes.empty() && gForegroundGame == Game::None);
+    check("game_focus_loss_keeps_capture_styles_and_status", GetWindowLongPtrW(gOverlayWnd, GWL_EXSTYLE) == gameStyle &&
+        WindowText(GetDlgItem(gSettingsWnd, IDC_GAME_STATUS)).find(L"표시 유지") != std::wstring::npos);
+    gConfig.gameOverlay = false; ApplyOverlayWindowStyle();
+    const auto obsStyle = GetWindowLongPtrW(gOverlayWnd, GWL_EXSTYLE);
+    check("obs_mode_restores_original_window_options", (obsStyle & WS_EX_APPWINDOW) &&
+        !(obsStyle & (WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_TOPMOST)));
+    DestroyWindow(gOverlayWnd);
+    gConfig = beforePositionTests; RebuildLaneConfig(); FillSettingsControls(gSettingsWnd);
+    check("position_only_draft_clears_dirty_after_save", SaveSettings() && (edit(IDC_X, L"765"), SavePositionDraft()) && !gUnapplied && !gUnsaved);
+    // Exercise real filesystem failures in this isolated self-test directory.
+    check("save_before_failure_tests", SaveSettings());
+    std::string committedJson, committedIni, afterFailure;
+    ReadTextFile(gJsonConfigPath, committedJson);
+    ReadTextFile(gIniConfigPath, committedIni);
+    const Config committedConfig = gSavedConfig;
+    HANDLE lockedJson = CreateFileW(gJsonConfigPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    edit(IDC_X, L"321");
+    const bool blockedSave = !SaveSettings();
+    if (lockedJson != INVALID_HANDLE_VALUE) CloseHandle(lockedJson);
+    check("locked_json_preserves_previous_save", lockedJson != INVALID_HANDLE_VALUE && blockedSave && gUnsaved &&
+        SameConfig(gSavedConfig, committedConfig) && ReadTextFile(gJsonConfigPath, afterFailure) && afterFailure == committedJson);
+    check("failed_primary_save_does_not_touch_ini", ReadTextFile(gIniConfigPath, afterFailure) && afterFailure == committedIni);
+    const DWORD oldIniAttributes = GetFileAttributesW(gIniConfigPath.c_str());
+    const bool readOnlySet = SetFileAttributesW(gIniConfigPath.c_str(), oldIniAttributes | FILE_ATTRIBUTE_READONLY) != FALSE;
+    const bool primarySaved = SaveSettings();
+    check("ini_failure_does_not_hide_saved_json", readOnlySet && primarySaved && gIniSaveFailed && !gUnsaved &&
+        WindowText(GetDlgItem(gSettingsWnd, IDC_STATUS)).find(L"호환 INI") != std::wstring::npos);
+    check("failed_ini_replacement_preserves_old_file", ReadTextFile(gIniConfigPath, afterFailure) && afterFailure == committedIni);
+    SetFileAttributesW(gIniConfigPath.c_str(), oldIniAttributes);
+    const Config latestSaved = gSavedConfig;
+    gConfig = Config{};
+    check("saved_primary_restores_after_compatibility_failure", LoadJsonConfig() && (ClampAndRebuildConfig(), SameConfig(gConfig, latestSaved)) && gConfig.x == 321);
+    check("save_retry_repairs_compatibility_copy", SaveSettings() && !gIniSaveFailed);
+    gConfig = Config{};
+    LoadIniConfig(); ClampAndRebuildConfig();
+    check("atomic_ini_roundtrip_all_settings", SameConfig(gConfig, latestSaved));
+    const std::wstring intactJsonPath = gJsonConfigPath;
+    gJsonConfigPath = CurrentDirectory() + L"truncated.json";
+    const bool truncatedWritten = WriteTextFile(gJsonConfigPath, "{\"overlay\":{\"width\":777},\"input\":{");
+    gConfig = Config{};
+    const bool jsonRejected = !LoadJsonConfig();
+    if (jsonRejected) LoadIniConfig();
+    ClampAndRebuildConfig();
+    check("truncated_json_uses_intact_ini", truncatedWritten && jsonRejected && SameConfig(gConfig, latestSaved));
+    gJsonConfigPath = intactJsonPath;
+    WIN32_FIND_DATAW temporary{};
+    HANDLE leftovers = FindFirstFileW((CurrentDirectory() + L"*.tmp.*").c_str(), &temporary);
+    check("save_staging_files_cleaned_up", leftovers == INVALID_HANDLE_VALUE);
+    if (leftovers != INVALID_HANDLE_VALUE) FindClose(leftovers);
+    // A failure must leave the save indicator dirty, even if the active values are valid.
+    gJsonConfigPath = CurrentDirectory() + L"missing-directory\\config.json";
+    check("save_failure_visible", !SaveSettings() && gUnsaved && WindowText(GetDlgItem(gSettingsWnd, IDC_STATUS)).find(L"저장 실패") != std::wstring::npos);
+
+    // Exercise the opt-in flow against isolated files, including a real worker
+    // write failure. No keyboard hook or real input is installed by this test.
+    const auto reportTestRoot = std::filesystem::path(CurrentDirectory()) /
+        (L"report-ui-" + std::to_wstring(GetTickCount64()));
+    std::error_code reportSetupError;
+    const bool reportRootCreated = std::filesystem::create_directory(reportTestRoot, reportSetupError);
+    check("report_test_isolated_directory", reportRootCreated && !reportSetupError);
+    if (!reportRootCreated || reportSetupError) return 1; // Never use another run's files.
+    gJsonConfigPath = (reportTestRoot / L"config.json").wstring();
+    gIniConfigPath = (reportTestRoot / L"config.ini").wstring();
+    gConfig = Config{}; gConfig.lanesText = L"D,F,J,K";
+    RebuildLaneConfig(); ResetDifficulty(4); FillSettingsControls(gSettingsWnd);
+    RecordDifficultyInput(0, true, 1000); RecordDifficultyInput(0, false, 1010);
+    RefreshDifficultyDisplay(12000);
+    check("report_default_off_creates_nothing", !gConfig.reportAutoSave && !gReportRecorder.Active() &&
+        gPendingReports.empty() && !std::filesystem::exists(ReportDirectory(), reportSetupError) && !reportSetupError);
+    SendDlgItemMessageW(gSettingsWnd, IDC_REPORT_AUTO, BM_SETCHECK, BST_CHECKED, 0);
+    click(IDC_REPORT_AUTO);
+    check("report_checkbox_is_only_a_draft", !gConfig.reportAutoSave && gUnapplied);
+    check("report_opt_in_apply_and_save", SaveSettings() && gConfig.reportAutoSave);
+    gConfig = Config{};
+    check("report_json_roundtrip", LoadJsonConfig() && gConfig.reportAutoSave);
+    gConfig = Config{}; LoadIniConfig();
+    check("report_ini_roundtrip", gConfig.reportAutoSave);
+    ClampAndRebuildConfig(); ResetDifficulty(4); FillSettingsControls(gSettingsWnd);
+    if (blockFirstReport) check("report_initial_failure_fixture", WriteTextFile(ReportDirectory().wstring(), "owned test fixture"));
+    RecordDifficultyInput(0, true, 1000); RecordDifficultyInput(0, false, 1010);
+    SpawnTestNotes();
+    RefreshDifficultyDisplay(11009);
+    check("report_waits_for_ten_seconds", gReportRecorder.Active() && gPendingReports.empty());
+    RefreshDifficultyDisplay(11010); PollReportWrites(true);
+    std::string reportHtml;
+    std::error_code reportReadError;
+    std::vector<std::filesystem::path> reportFiles;
+    if (blockFirstReport) {
+        // The old throwing directory_iterator aborted here if the first write
+        // failed. Exercise the real failure, inspection and retry in that order.
+        check("report_initial_failure_is_retained", gReportSaveFailed && gPendingReports.size() == 1);
+        check("report_failed_directory_inspection_returns_error",
+            !self_test_io::HtmlReports(ReportDirectory(), reportFiles, reportReadError) && reportReadError);
+        std::error_code fixtureError;
+        check("report_initial_failure_fixture_removed", std::filesystem::remove(ReportDirectory(), fixtureError) && !fixtureError);
+        click(IDC_REPORT_RETRY); PollReportWrites(true);
+        check("report_initial_failure_recovers", !gReportSaveFailed && gPendingReports.empty());
+    }
+    const bool reportsReadable = self_test_io::HtmlReports(ReportDirectory(), reportFiles, reportReadError);
+    for (const auto& file : reportFiles) ReadTextFile(file.wstring(), reportHtml);
+    check("report_autosaves_one_html_and_excludes_preview", reportsReadable && reportFiles.size() == 1 && !gReportRecorder.Active() &&
+        gPendingReports.empty() && reportHtml.find("총 누름<span class='value'>1회") != std::string::npos);
+    RefreshDifficultyDisplay(30000); PollReportWrites(true);
+    check("report_idle_does_not_duplicate", gPendingReports.empty() && !gReportWrite.valid());
+    // A file in place of the output directory deterministically denies creation.
+    const auto goodJsonPath = gJsonConfigPath;
+    const auto blocker = reportTestRoot / L"blocked";
+    check("report_failure_fixture", WriteTextFile(blocker.wstring(), "keep"));
+    gJsonConfigPath = (blocker / L"config.json").wstring();
+    RecordDifficultyInput(1, true, 40000); RecordDifficultyInput(1, false, 40010);
+    // Finish without a timer tick: the first key of the next session queues it.
+    RecordDifficultyInput(2, true, 51000); RecordDifficultyInput(2, false, 51010);
+    check("report_delayed_timer_keeps_sessions_separate", gPendingReports.size() == 1 && gReportRecorder.Active());
+    PollReportWrites(true); RefreshReportStatus();
+    check("report_failure_keeps_data_and_shows_retry", gReportSaveFailed && gPendingReports.size() == 1 &&
+        IsWindowEnabled(GetDlgItem(gSettingsWnd, IDC_REPORT_RETRY)) &&
+        WindowText(GetDlgItem(gSettingsWnd, IDC_REPORT_STATUS)).find(L"저장 실패") != std::wstring::npos);
+    for (int i = 0; i < 4; ++i) {
+        const double t = 70000 + i * 20000;
+        RecordDifficultyInput(0, true, t); RecordDifficultyInput(0, false, t + 10);
+    }
+    check("report_queue_is_bounded_and_pauses", gPendingReports.size() == kMaxPendingReports && !gReportRecorder.Active());
+    gJsonConfigPath = goodJsonPath;
+    click(IDC_REPORT_RETRY); PollReportWrites(true);
+    check("report_retry_saves_retained_sessions", !gReportSaveFailed && gPendingReports.empty());
+    RecordDifficultyInput(0, true, 160000); RecordDifficultyInput(0, false, 160010);
+    SendDlgItemMessageW(gSettingsWnd, IDC_REPORT_AUTO, BM_SETCHECK, BST_UNCHECKED, 0);
+    check("report_opt_out_finishes_current_session", ReadSettingsControls() && !gConfig.reportAutoSave && !gReportRecorder.Active());
+    PollReportWrites(true);
+    RecordDifficultyInput(1, true, 170000); RecordDifficultyInput(1, false, 170010);
+    check("report_opt_out_stops_new_recording", !gReportRecorder.Active() && gPendingReports.empty());
+    gConfig = Config{};
+    check("legacy_report_json_fixture", WriteTextFile(gJsonConfigPath, "{\"overlay\":{\"width\":640}}"));
+    check("legacy_report_json_defaults_off", LoadJsonConfig() && !gConfig.reportAutoSave && !gConfig.gameOverlay);
+    check("legacy_report_ini_fixture", WriteTextFile(gIniConfigPath, "[overlay]\nwidth=640\n"));
+    gConfig = Config{}; LoadIniConfig();
+    check("legacy_report_ini_defaults_off", !gConfig.reportAutoSave && !gConfig.gameOverlay);
+    // Remove only the fresh directory owned by this test invocation.
+    if (reportRootCreated) {
+        std::error_code cleanupError;
+        check("report_test_files_cleaned", self_test_io::RemoveOwnedDirectory(reportTestRoot, CurrentDirectory(), cleanupError));
+    }
+    gReportStatus.clear();
+    DestroyWindow(gSettingsWnd);
+    gSettingsWnd = nullptr;
+    DeleteObject(gGuiFont);
+    DestroyHudFonts();
+    log << "checks=" << checks << "\nfailures=" << failures << "\nresult=" << (failures ? "fail" : "ok") << "\n";
+    return failures ? 1 : 0;
+}
+
+struct LifecycleTestState {
+    int adds = 0, deletes = 0, versions = 0, prompts = 0;
+    int choice = IDCANCEL;
+    bool failAdd = false, failVersion = false, deleteOwnerAlive = false;
+} gLifecycleTest;
+
+BOOL WINAPI TestNotifyIcon(DWORD action, PNOTIFYICONDATAW data) {
+    if (action == NIM_ADD) { ++gLifecycleTest.adds; return !gLifecycleTest.failAdd; }
+    if (action == NIM_SETVERSION) { ++gLifecycleTest.versions; return !gLifecycleTest.failVersion; }
+    if (action == NIM_DELETE) {
+        ++gLifecycleTest.deletes;
+        gLifecycleTest.deleteOwnerAlive = IsWindow(data->hWnd) != FALSE;
+    }
+    return TRUE;
+}
+
+int WINAPI TestExitMessageBox(HWND, LPCWSTR, LPCWSTR, UINT) {
+    ++gLifecycleTest.prompts;
+    // A second close while the save dialog is open must not open another one.
+    RequestApplicationClose();
+    return gLifecycleTest.choice;
+}
+
+int RunLifecycleSelfTest(bool realTray) {
+    gUiSelfTest = true;
+    InitCommonControls();
+    gGuiFont = CreateSettingsFont();
+    if (!RegisterWindows()) return 1;
+    gNotifyIcon = realTray ? &Shell_NotifyIconW : &TestNotifyIcon;
+    gExitMessageBox = &TestExitMessageBox;
+    std::ofstream log(realTray ? "key_note_cpp_tray_smoke.log" : "key_note_cpp_lifecycle_selftest.log", std::ios::trunc);
+    log << std::unitbuf;
+    int checks = 0, failures = 0;
+    auto check = [&](const char* name, bool ok) {
+        log << name << "=" << (ok ? "ok" : "FAIL") << '\n'; ++checks; if (!ok) ++failures;
+    };
+    auto create = [&]() {
+        MSG quit{};
+        while (PeekMessageW(&quit, nullptr, WM_QUIT, WM_QUIT, PM_REMOVE)) {}
+        gShuttingDown = gCloseInProgress = gAppRunning = false;
+        gUnapplied = gUnsaved = false;
+        gLifecycleTest = {};
+        gConfig = Config{};
+        RebuildLaneConfig(); gSavedConfig = gConfig;
+        gJsonConfigPath = CurrentDirectory() + L"lifecycle.json";
+        gIniConfigPath = CurrentDirectory() + L"lifecycle.ini";
+        gConfigPath = gJsonConfigPath;
+        gOverlayWnd = CreateWindowW(L"KeyNoteOverlayCppWindow", L"hidden lifecycle overlay", WS_POPUP,
+            0, 0, 900, 220, nullptr, nullptr, gInstance, nullptr);
+        gSettingsWnd = CreateWindowW(L"KeyNoteOverlayCppSettings", L"hidden lifecycle settings", WS_OVERLAPPEDWINDOW,
+            0, 0, 760, 680, nullptr, nullptr, gInstance, nullptr);
+        gAppRunning = IsWindow(gOverlayWnd) && IsWindow(gSettingsWnd);
+        return gAppRunning;
+    };
+    auto stopped = [&](HWND overlay, HWND settings) {
+        MSG quit{};
+        return gShuttingDown && !gAppRunning && !gTrayAdded && !gKeyboardHook &&
+            !gOverlayWnd && !gSettingsWnd && !IsWindow(overlay) && !IsWindow(settings) &&
+            PeekMessageW(&quit, nullptr, WM_QUIT, WM_QUIT, PM_NOREMOVE);
+    };
+    check("hidden_window_pair", create() && !IsWindowVisible(gOverlayWnd) && !IsWindowVisible(gSettingsWnd));
+    HWND overlay = gOverlayWnd, settings = gSettingsWnd;
+    if (realTray) {
+        // Opt-in smoke only: registers a real icon, never a keyboard hook or a
+        // visible window. Query shell state before and after normal app exit.
+        check("real_tray_add", AddTrayIcon());
+        NOTIFYICONIDENTIFIER id{};
+        id.cbSize = sizeof(id); id.hWnd = settings; id.uID = TRAY_ICON_ID;
+        RECT iconRect{};
+        check("real_shell_icon_present", SUCCEEDED(Shell_NotifyIconGetRect(&id, &iconRect)));
+        SendMessageW(overlay, WM_CLOSE, 0, 0);
+        check("real_exit_closes_both_windows", stopped(overlay, settings));
+        check("real_shell_icon_removed", FAILED(Shell_NotifyIconGetRect(&id, &iconRect)));
+    } else {
+        check("tray_add_once", AddTrayIcon() && AddTrayIcon() && gLifecycleTest.adds == 1 && gLifecycleTest.versions == 1);
+        check("tray_v4_mouse_keyboard_and_id", TrayEvent(0, MAKELPARAM(NIN_SELECT,TRAY_ICON_ID)) == NIN_SELECT &&
+            TrayEvent(0, MAKELPARAM(NIN_KEYSELECT,TRAY_ICON_ID)) == NIN_KEYSELECT &&
+            TrayEvent(0, MAKELPARAM(WM_CONTEXTMENU,TRAY_ICON_ID)) == WM_CONTEXTMENU && TrayEvent(0, MAKELPARAM(NIN_SELECT,99)) == 0);
+        SendMessageW(settings, gTaskbarCreatedMessage, 0, 0);
+        check("explorer_restart_reregisters_once", gTrayAdded && gLifecycleTest.adds == 2 && gLifecycleTest.versions == 2);
+        gUnsaved = true;
+        gLifecycleTest.choice = IDCANCEL;
+        SendMessageW(overlay, WM_CLOSE, 0, 0);
+        check("overlay_close_cancel_preserves_app", IsWindow(overlay) && IsWindow(settings) && gTrayAdded &&
+            !gShuttingDown && !gCloseInProgress && gLifecycleTest.prompts == 1 && gLifecycleTest.deletes == 0);
+        gLifecycleTest.choice = IDYES;
+        gJsonConfigPath = CurrentDirectory() + L"missing-directory\\config.json";
+        SendMessageW(settings, WM_COMMAND, ID_TRAY_EXIT, 0);
+        check("tray_exit_save_failure_preserves_app", gUnsaved && IsWindow(overlay) && IsWindow(settings) &&
+            gTrayAdded && !gShuttingDown && !gCloseInProgress);
+        gJsonConfigPath = CurrentDirectory() + L"lifecycle.json";
+        SendMessageW(settings, WM_COMMAND, ID_TRAY_EXIT, 0);
+        check("tray_save_exit_closes_everything", stopped(overlay, settings) && !gUnsaved && !gUnapplied);
+        check("tray_deleted_before_owner_destroyed", gLifecycleTest.deletes == 1 && gLifecycleTest.deleteOwnerAlive);
+        ShutdownApplication(); RemoveTrayIcon();
+        check("cleanup_is_idempotent", gLifecycleTest.deletes == 1);
+
+        check("restart_hidden_pair", create());
+        overlay = gOverlayWnd; settings = gSettingsWnd;
+        gLifecycleTest.failAdd = true;
+        check("tray_add_failure_does_not_claim_success", !AddTrayIcon() && !gTrayAdded);
+        gLifecycleTest.failAdd = false; gLifecycleTest.failVersion = true;
+        SendMessageW(settings, WM_TIMER, TIMER_TRAY_RETRY, 0);
+        check("tray_retry_and_legacy_callback", gTrayAdded && !gTrayVersion4 && gLifecycleTest.adds == 2 &&
+            TrayEvent(TRAY_ICON_ID, WM_LBUTTONUP) == WM_LBUTTONUP && TrayEvent(99, WM_LBUTTONUP) == 0);
+        gUnsaved = true; gLifecycleTest.choice = IDNO;
+        SendMessageW(overlay, WM_CLOSE, 0, 0);
+        check("overlay_discard_exit_closes_everything", stopped(overlay, settings) && gLifecycleTest.deletes == 1);
+
+        check("settings_close_setup", create() && AddTrayIcon());
+        overlay = gOverlayWnd; settings = gSettingsWnd;
+        SendMessageW(settings, WM_CLOSE, 0, 0);
+        check("settings_close_closes_everything", stopped(overlay, settings) && gLifecycleTest.deletes == 1);
+
+        check("destroy_path_setup", create() && AddTrayIcon());
+        overlay = gOverlayWnd; settings = gSettingsWnd;
+        DestroyWindow(overlay);
+        check("unexpected_overlay_destroy_closes_settings", stopped(overlay, settings) && gLifecycleTest.deletes == 1);
+
+        check("session_end_setup", create() && AddTrayIcon());
+        overlay = gOverlayWnd; settings = gSettingsWnd;
+        SendMessageW(settings, WM_ENDSESSION, FALSE, 0);
+        check("cancelled_session_end_keeps_app", IsWindow(overlay) && IsWindow(settings) && gTrayAdded);
+        SendMessageW(settings, WM_ENDSESSION, TRUE, 0);
+        check("session_end_cleans_up", stopped(overlay, settings) && gLifecycleTest.deletes == 1);
+
+        check("report_close_setup", create() && AddTrayIcon());
+        const auto reportCloseRoot = std::filesystem::path(CurrentDirectory()) /
+            (L"report-close-" + std::to_wstring(GetTickCount64()));
+        std::error_code closeError;
+        const bool closeRootCreated = std::filesystem::create_directory(reportCloseRoot, closeError);
+        check("report_close_isolated_directory", closeRootCreated && !closeError);
+        if (!closeRootCreated || closeError) return 1;
+        gJsonConfigPath = (reportCloseRoot / L"config.json").wstring();
+        gConfig.reportAutoSave = true;
+        gReportWaitForFreshSession = false;
+        const double start = NowMs();
+        RecordDifficultyInput(0, true, start); RecordDifficultyInput(0, false, start + 1);
+        gUnsaved = true; gLifecycleTest.choice = IDCANCEL;
+        SendMessageW(gSettingsWnd, WM_CLOSE, 0, 0);
+        check("report_cancelled_close_keeps_active_session", gReportRecorder.Active() &&
+            !std::filesystem::exists(ReportDirectory(), closeError) && !closeError);
+        gLifecycleTest.choice = IDNO;
+        SendMessageW(gSettingsWnd, WM_CLOSE, 0, 0);
+        check("report_normal_close_saves_partial_session", !gReportRecorder.Active() && gPendingReports.empty() &&
+            !gReportSaveFailed && std::filesystem::is_directory(ReportDirectory(), closeError) && !closeError);
+
+        check("report_failed_close_setup", create() && AddTrayIcon());
+        const auto blocker = reportCloseRoot / L"blocked";
+        check("report_failed_close_fixture", WriteTextFile(blocker.wstring(), "keep"));
+        gJsonConfigPath = (blocker / L"config.json").wstring();
+        gConfig.reportAutoSave = true;
+        const double failedStart = NowMs();
+        RecordDifficultyInput(1, true, failedStart); RecordDifficultyInput(1, false, failedStart + 1);
+        gLifecycleTest.choice = IDNO;
+        SendMessageW(gSettingsWnd, WM_CLOSE, 0, 0);
+        check("report_failed_close_can_return_without_loss", IsWindow(gSettingsWnd) && !gShuttingDown &&
+            gReportSaveFailed && gPendingReports.size() == 1);
+        gJsonConfigPath = (reportCloseRoot / L"config.json").wstring();
+        SendMessageW(gSettingsWnd, WM_COMMAND, IDC_REPORT_RETRY, 0);
+        SendMessageW(gSettingsWnd, WM_CLOSE, 0, 0);
+        check("report_close_after_retry_saves_pending", !IsWindow(gSettingsWnd) && gPendingReports.empty() && !gReportSaveFailed);
+        if (closeRootCreated)
+            check("report_close_files_cleaned", self_test_io::RemoveOwnedDirectory(reportCloseRoot, CurrentDirectory(), closeError));
+    }
+    CleanupApplication();
+    log << "checks=" << checks << "\nfailures=" << failures << "\nresult=" << (failures ? "fail" : "ok") << '\n';
+    return failures ? 1 : 0;
 }
 
 int RunSelfTest() {
@@ -1682,18 +4159,47 @@ int RunSelfTest() {
     return ok ? 0 : 1;
 }
 
+// An unattended self-test should report a normal failure, not invoke terminate
+// or a Windows crash dialog. Keep this boundary separate from normal app startup.
+template<class Test> int RunCheckedSelfTest(const char* name, Test test) {
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+    try { return test(); }
+    catch (const std::exception& error) {
+        std::ofstream log("key_note_cpp_selftest_exception.log", std::ios::app);
+        log << std::unitbuf << "test=" << name << "\nexception=" << error.what() << "\nresult=fail\nexit_code=2\n";
+    }
+    catch (...) {
+        std::ofstream log("key_note_cpp_selftest_exception.log", std::ios::app);
+        log << "test=" << name << "\nexception=unknown\nresult=fail\nexit_code=2\n";
+    }
+    return 2;
+}
+
 } // namespace
 
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int showCommand) {
     gInstance = instance;
-    if (std::wstring(GetCommandLineW()).find(L"--self-test") != std::wstring::npos) {
-        return RunSelfTest();
+    const std::wstring command = GetCommandLineW();
+    if (command.find(L"--self-test-exception") != std::wstring::npos) {
+        return RunCheckedSelfTest("exception-boundary", []() -> int {
+            throw std::filesystem::filesystem_error("intentional self-test fixture", std::make_error_code(std::errc::permission_denied));
+        });
     }
+    if (command.find(L"--self-test") != std::wstring::npos) return RunCheckedSelfTest("core", RunSelfTest);
+    if (command.find(L"--ui-self-test") != std::wstring::npos)
+        return RunCheckedSelfTest("ui", [&]() { return RunUiSelfTest(command.find(L"--report-output-blocked") != std::wstring::npos); });
+    if (command.find(L"--lifecycle-self-test") != std::wstring::npos)
+        return RunCheckedSelfTest("lifecycle", [] { return RunLifecycleSelfTest(false); });
+    if (command.find(L"--tray-smoke-test") != std::wstring::npos)
+        return RunCheckedSelfTest("tray", [] { return RunLifecycleSelfTest(true); });
 
     InitCommonControls();
     LoadConfig();
+    gConfig.lanesText = CanonicalLaneText();
+    gSavedConfig = gConfig;
+    ResetDifficulty(static_cast<int>(gConfig.lanes.size()));
 
-    gGuiFont = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    gGuiFont = CreateSettingsFont();
     gNoteFont = CreateFontW(
         18,
         0,
@@ -1729,8 +4235,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int showCommand) {
 
     if (!RegisterWindows() || !CreateAppWindows(showCommand)) {
         MessageBoxW(nullptr, L"Failed to create Key Note Overlay C++ windows.", L"Key Note Overlay C++", MB_ICONERROR);
+        CleanupApplication();
         return 1;
     }
+    if (!AddTrayIcon()) SetStatus(L"트레이 등록을 기다리고 있어요. 실행 중 자동으로 다시 시도합니다.");
 
     gKeyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardProc, GetModuleHandleW(nullptr), 0);
     if (!gKeyboardHook) {
@@ -1740,22 +4248,15 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int showCommand) {
     SpawnTestNotes();
 
     MSG msg{};
-    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+    BOOL messageResult = 0;
+    while ((messageResult = GetMessageW(&msg, nullptr, 0, 0)) > 0) {
+        if (HandleCaptureMessage(msg)) continue;
+        if (HandleDifficultyTestMessage(msg)) continue;
+        if (IsDialogMessageW(gSettingsWnd, &msg)) continue;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
 
-    if (gKeyboardHook) {
-        UnhookWindowsHookEx(gKeyboardHook);
-        gKeyboardHook = nullptr;
-    }
-    if (gNoteFont) {
-        DeleteObject(gNoteFont);
-        gNoteFont = nullptr;
-    }
-    if (gKeyFont) {
-        DeleteObject(gKeyFont);
-        gKeyFont = nullptr;
-    }
-    return static_cast<int>(msg.wParam);
+    CleanupApplication();
+    return messageResult < 0 ? 1 : static_cast<int>(msg.wParam);
 }

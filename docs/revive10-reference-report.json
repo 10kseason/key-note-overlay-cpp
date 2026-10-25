@@ -1,0 +1,318 @@
+{
+  "version": 1,
+  "name": "10K Revive 2026 Skill Simulator",
+  "keys": 10,
+  "courses": 16,
+  "stages": 64,
+  "source": "User-supplied 2026 course selection screenshots; titles, variants and levels uniquely matched to original local chart bytes.",
+  "matching": "All 64 screenshot stage titles/variants and displayed levels uniquely match the pinned local chart bytes. The online source was not reachable during this construction.",
+  "statistic": "Mean of strongest three overlapping 8-second pattern-load windows; 2-second step; ordered stages separated by 10-second analysis gaps",
+  "metric": "stars + 1.6*pattern_variety + 0.5*rhythm_complexity + 0.4*column_repeat_load + 0.1*adjacent_repeat_load",
+  "reference_hold_weight": 1.0,
+  "live_hold_weight": 0.6666666666666666,
+  "assignment": "Nearest reference band at midpoint boundaries; descending adjacent courses pooled and displayed as a range",
+  "evaluation": "Reference construction, not held-out accuracy or prediction of course clear; weights inherited from v2.8 without refitting",
+  "long_note_semantics": "Normal LN and charge notes are represented as physical press-hold-release intervals. Release judgement and course gauge rules are not simulated.",
+  "labels": {
+    "15": "개전",
+    "16": "오버조이"
+  },
+  "hashes": {
+    "course_manifest": "40a13bfbfc65a6534e33c9ac16ef626085b6f624a5d86f849c79852045156f47",
+    "features": "1f7f8a06eb78a0209ff7c5e0a03f213415eae127a3aa8629d9fb9fd9e3b06b57",
+    "feature_extractor": "d2ca551a47425f62dfee619a712646029d98ec621c0c242a057c893f49dd97b9",
+    "bms_decoder": "db21e7db3dea7f5a9c381f85fd7dcbc1f9999125c2e6a07db57860ffe60b10b0"
+  },
+  "bands": [
+    {
+      "strain": 3.3797,
+      "low": 1,
+      "high": 1
+    },
+    {
+      "strain": 5.05468,
+      "low": 2,
+      "high": 2
+    },
+    {
+      "strain": 8.36643,
+      "low": 3,
+      "high": 3
+    },
+    {
+      "strain": 9.45195,
+      "low": 4,
+      "high": 4
+    },
+    {
+      "strain": 11.9438,
+      "low": 5,
+      "high": 5
+    },
+    {
+      "strain": 12.4637,
+      "low": 6,
+      "high": 6
+    },
+    {
+      "strain": 12.6503,
+      "low": 7,
+      "high": 7
+    },
+    {
+      "strain": 14.3099,
+      "low": 8,
+      "high": 8
+    },
+    {
+      "strain": 16.0635,
+      "low": 9,
+      "high": 9
+    },
+    {
+      "strain": 16.3659,
+      "low": 10,
+      "high": 10
+    },
+    {
+      "strain": 16.9666,
+      "low": 11,
+      "high": 11
+    },
+    {
+      "strain": 18.1857,
+      "low": 12,
+      "high": 12
+    },
+    {
+      "strain": 18.7054,
+      "low": 13,
+      "high": 13
+    },
+    {
+      "strain": 20.6002,
+      "low": 14,
+      "high": 14
+    },
+    {
+      "strain": 22.7947,
+      "low": 15,
+      "high": 15
+    },
+    {
+      "strain": 25.668,
+      "low": 16,
+      "high": 16
+    }
+  ],
+  "references": [
+    {
+      "rank": 1,
+      "label": "1",
+      "course_id": "2e23648fd4a4f80fef9c1ed0fa221b3731090b69f41daec20e0f1edba87fcd39",
+      "strain": 3.3797,
+      "nps": 2.20833,
+      "chart_sha256": [
+        "f972ac47fc738107c55ccf29aedbb53431f02800e51d81a335182bfc9c96469f",
+        "08b162dafcf92ca92167386d6869ec17540a0ed33c920d67fafcb7dc92b479cb",
+        "04594dbc5a5acfa9968646712536be2a9a020eee7aecbfe126fb0cc8ab636fa4",
+        "1924889e34b159db9866e13509f1a2b0b7d0df6e03423bc68189575efa674e6a"
+      ]
+    },
+    {
+      "rank": 2,
+      "label": "2",
+      "course_id": "68d09f67bed8a9d430ea499aa8d9124775481ba78a0bfb31a58f6e5b39ffe321",
+      "strain": 5.05468,
+      "nps": 4.16667,
+      "chart_sha256": [
+        "d777c0bd115c35c0d0279bc9f2752eab72123a5e328f121ae5e538f38f6cee35",
+        "f854344923a4bcc568a2f7aa5aa1ec8aabca02b5a2f8161c3a209875fa12c8b8",
+        "302241c65e7f4468c6596379686b430b8f59d508a205b9c300642c02b6ebccd1",
+        "4bbfcdb0539d928e463d9055cf65f6050aa4fbc0bbe19e452df9f4ba95699580"
+      ]
+    },
+    {
+      "rank": 3,
+      "label": "3",
+      "course_id": "a4f4294f96e9003f20f891bf4e3ccc0920f31b17c85fb9c7feb325518b70c4a1",
+      "strain": 8.36643,
+      "nps": 9.54167,
+      "chart_sha256": [
+        "359c80c26ff70551f080fd94e05e19d8d86f55c9fb78ecf6de5f8d91cc14ab5b",
+        "6eeea360586c501f785e6c82b6f33166008284b438c5e332874878b00f3a15e8",
+        "8854e86405dc611ffd0f77def98e3a4f5ee84d3c4a1ce2a0c31e38b49df3954f",
+        "2c02044f4fd47a6ffbcc3ee509a31fd3dbad0ad6575d7ed70a72425168de8929"
+      ]
+    },
+    {
+      "rank": 4,
+      "label": "4",
+      "course_id": "60d68b138ef99b85d2f7aa6a584d0093a710d02e883b8544ea5197eff88e75da",
+      "strain": 9.45195,
+      "nps": 13.8333,
+      "chart_sha256": [
+        "0ffbc8b88d60533a6d1c7eeed7cf7b7c6118a3d5fa5f183cad77b24a36cd9274",
+        "994636192cc1f13f62310a6a50c2e2774c7cf325ea539afb8b60545a38db93ee",
+        "f767dd19d0dce92147b40ff322d1cf50aee31a1c11041ff946fd3b5dedec75a3",
+        "77a1462ac6e7c29a58f5d28449e93b9bb7331be7520885c984500d001a6815de"
+      ]
+    },
+    {
+      "rank": 5,
+      "label": "5",
+      "course_id": "d356d0946117f7975e3578bdec5e8fd63cc7c921d37a071ce5f48df35c99c3dd",
+      "strain": 11.9438,
+      "nps": 14.875,
+      "chart_sha256": [
+        "08ca0da50c81440dec7fedf46b07fa88add8b6d3a86d824cd65415fa366f8d7f",
+        "3e08addb7d794a7a4387ccf579b74a44ad7e27ed5a60e2dff9e5f3870657ac2e",
+        "a45884717310a50d73f78376aeb56cf004e660cf58f84aa0d136306fbc18ad53",
+        "d1f0ba23bc65b86ea714897cc89db5932e3b07b57f23eb20e03dbce1235dd976"
+      ]
+    },
+    {
+      "rank": 6,
+      "label": "6",
+      "course_id": "5381b090065e4e1dd2e555202128da4f5043590d13002ffa7badbced8b9f2ac1",
+      "strain": 12.4637,
+      "nps": 15.5833,
+      "chart_sha256": [
+        "a25dfcaaccc39a024a691f62f7f06e267bb4b3a2b305e6d872872d72f55cc00e",
+        "feecdbcd4909604dc36797ca4c8f2683656b8ea6ed8569771cd77816ac718f84",
+        "39f2602a79678af69dd265e12a4116b49a9190106aa23f34ce5f77ff4309f40b",
+        "93b39ad67eba6e137dd1c68a78e3d110cffc2373a9f001daee07ee33036a9fe6"
+      ]
+    },
+    {
+      "rank": 7,
+      "label": "7",
+      "course_id": "e21ecadf79121329ca9aeb75bd72d7190dcad3df1739c970fb47052bb64c9c81",
+      "strain": 12.6503,
+      "nps": 17.0833,
+      "chart_sha256": [
+        "a841589bf64f41115544fe5ec07df5ea52a9bd0b3bd729306601ff363883be69",
+        "8180376673fdb8a42e42d5f04a5b3045a12352066e4a0f6bbb3fea685bba25fa",
+        "2d061e5690c6ad47d3c7002e0629c2e3ba228a989832d9ce2c9cbf5f90f35f9b",
+        "57f8a3c4f04dc4586f421c2239503a5a63232a3e31812037191cf4854c325448"
+      ]
+    },
+    {
+      "rank": 8,
+      "label": "8",
+      "course_id": "2d107949fa09c119f744e52f8001daac83942d694b1c14344ebabecbe0b3cc82",
+      "strain": 14.3099,
+      "nps": 23.125,
+      "chart_sha256": [
+        "ea09459b1aa98e80b5af70a8b8342fdb4b0bf0b0041c5f0fb832491891daeb98",
+        "f6c246599a53cc548da98a8f55a5260409fddaef3bef8b5faa2becc6946a679d",
+        "b0c9b527f9d6f6466f27128ce603de6460778ccbe915606690bc00b9c7fff22e",
+        "f6c17dd4dd314ab3b2481f3af5c91343c7feb3bfd634f417f4f2f146f35c991d"
+      ]
+    },
+    {
+      "rank": 9,
+      "label": "9",
+      "course_id": "1683fd32bf229bf936868a0a15500818f9dc95e6a6337dea5af317f0b71160fd",
+      "strain": 16.0635,
+      "nps": 21.2083,
+      "chart_sha256": [
+        "e2f192b25514928230217eb52d1982ad1abe356c94515b2a30ea04c2f95d5b0e",
+        "ca8f7aaea7f81de6d3ad603cb91a4e6d6cde11084186e98673b948be0e81fd89",
+        "28f3f820e3043bb0371e1d9284eebc07597c7489f5773b15664ba70c01da79a4",
+        "f284b41614c84ef97758960b2611e5291e75313497ed364ac396e1da3e939e27"
+      ]
+    },
+    {
+      "rank": 10,
+      "label": "10",
+      "course_id": "894ad2bde398cdc248c56fc5298b06c3a4dbe0cd433a5a46b57736a3829cf6d8",
+      "strain": 16.3659,
+      "nps": 23.0417,
+      "chart_sha256": [
+        "7463218a4c758a610d0884128e0d1e64706521903960df372dd58dc771d8e646",
+        "ab0ce23f02bc10bbb352ca30c37726fdfbba067b3b830a47582d4833a838f5a7",
+        "e2c65bb18fe0094ca7827de554610f752845368203800b85ad91ae522ffcb1ab",
+        "abf92187db7b885150e685e0c66f3325e3fa3661d2c2d74c22a3ee84b2560c8f"
+      ]
+    },
+    {
+      "rank": 11,
+      "label": "11",
+      "course_id": "c50f9add4c11e4948161a9a1b6a31b254dad51f48821d838eb7ad7d531662fd1",
+      "strain": 16.9666,
+      "nps": 25.0,
+      "chart_sha256": [
+        "4b4e6aa8a6e7541c28a1bd12263074c4a7111ff63a1007d47e4996c5cdeca066",
+        "50718a84d4b1bb0f23549a5308fb09238453ffa38a4a6a7853061a73eeacc355",
+        "1ef11cf3bedf056dd18a758a6bfdc04139db8d713bd21171602b0d0ed4958634",
+        "f549a8e3c920f0182a334df5bfc978537ba27ab99d76b2edad1c9ec479692564"
+      ]
+    },
+    {
+      "rank": 12,
+      "label": "12",
+      "course_id": "4413fc698ecb614d3de193224179a45d84ef378fd2ff1c72b87d168559e93558",
+      "strain": 18.1857,
+      "nps": 26.0417,
+      "chart_sha256": [
+        "51c570c87544b3e92ba92b626923901dbf1ce130cce320b53ccedab7881afd20",
+        "a6194c1a5024d3dc578946ca90b9d7d4ac33c94a949cca19835e0aaa3e965635",
+        "035bd40c766f66e146bed9cc69dbcdb8c899d6a9447d3f1c3fe6edd7904c08bb",
+        "d1d86107a3e421702930670dd91dca19903474f04328c91fbbd30b9bbaa8cee4"
+      ]
+    },
+    {
+      "rank": 13,
+      "label": "13",
+      "course_id": "32b0e2923ccf802aa83740ecf6b31e1d1105b106eabba87afe26d7149f8b9e24",
+      "strain": 18.7054,
+      "nps": 28.2083,
+      "chart_sha256": [
+        "17177afb87da7dac16487058d4dd3c84e5bb006a8313c0b336180165e4080dd6",
+        "f89ce2daca40322ae26cebe0eafa2604143b165c501889ac65c938e2696b7abc",
+        "350fd4fd2385abeabe0d63efdd4261e8e7ed535afc8bd0ec7a167410597d081d",
+        "25c9d1f5b65655995c0154545b42db6082c0394ddad085eab2bce2df593062b4"
+      ]
+    },
+    {
+      "rank": 14,
+      "label": "14",
+      "course_id": "db743f912e08a60adc0191e45981941cbaedd5273bfdbd8fb85148a4892c24b3",
+      "strain": 20.6002,
+      "nps": 34.875,
+      "chart_sha256": [
+        "92131f0e141cb52b3aff6f7b5a0327363a771cf812f43187286d134ad4419bef",
+        "c31f13417acaedfba86c3602f46e65fe3778bebc76ad808eec7a5910b3bd0ca5",
+        "763c667b64d05788c4b4d76d8aa7141c584411ecc16528492cb8003f269f41c9",
+        "c45fdcce437ef42bda5d2a13cb0f9a5f3e4e9c8d997f6c3164ca344825094ecb"
+      ]
+    },
+    {
+      "rank": 15,
+      "label": "Kaiden",
+      "course_id": "2044e6b7108c3e46ccceb5d0143699b634cbe999ed87fd7fc21f68bc79cf5119",
+      "strain": 22.7947,
+      "nps": 35.7083,
+      "chart_sha256": [
+        "2fb98afd1abe4ae5b1271e8de70a1710754d46f3722e72f3f802f988475667f6",
+        "023206fbbe94a32dec77a5da9e2ec0dfae657db3cd32e024323d10b3b5843cdf",
+        "5604e5cdcfd11eff9f472b8ab8b0c156c459afa547065176afaf5f53627fbfd8",
+        "d0c990ba998cf6a8aab9926748dc19bd87cefcc82133765e5123bdd299c79286"
+      ]
+    },
+    {
+      "rank": 16,
+      "label": "OVERJOY",
+      "course_id": "353b8a740ef0ce6cd9b379bd997dea53aa04c550713a529fa1cf42612c25a092",
+      "strain": 25.668,
+      "nps": 46.2917,
+      "chart_sha256": [
+        "1735a854d69c182590ff0cd39b5d2c1d10dbaedad2ab84586894d03a56586563",
+        "ee0aef53a95511a7a0a417eece9d0c9a56c2c9e05ea16b84139a911688583474",
+        "1f6563015b181f90a875969f85cf725991f3d3be9784e02d8db8409eda5951c1",
+        "1ad97c55ef29210bd8af93f50132a56c3648159069fb9b3a046d0d8d7fb93317"
+      ]
+    }
+  ]
+}

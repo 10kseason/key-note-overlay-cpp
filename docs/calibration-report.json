@@ -1,0 +1,72 @@
+{
+  "version": 2,
+  "split": "song-directory group hash: 20% untouched holdout, 4-fold train-only model selection",
+  "target": "table label; features use mean of strongest three overlapping 8-second windows per chart",
+  "evaluation_scope": "offline chart-level proxy, not measured live keyboard accuracy or a per-window confidence interval",
+  "features_sha256": "b213ecbefc5ca3e7270db2c5edafa0e9999b6b53dcb71e6ca697e49a6ae3c52b",
+  "runtime": {
+    "window_ms": 8000,
+    "warmup_context_ms": 4000,
+    "section_ms": 400,
+    "chord_anchor_ms": 15,
+    "hold_threshold_ms": 90
+  },
+  "source_tables": {
+    "5": "https://asumatoki.kr/table/aery/header.json",
+    "8": "http://walkure.net/hakkyou/for_glassist/bms/?lamp=normal"
+  },
+  "profiles": {
+    "5": {
+      "charts": 1674,
+      "train": 1346,
+      "test": 328,
+      "train_groups": 874,
+      "test_groups": 199,
+      "overlapping_groups": 0,
+      "label_range": [
+        1.0,
+        20.5
+      ],
+      "train_cv_mae": 0.5625306843365682,
+      "baseline_train_cv_mae": 0.6591628122954214,
+      "bins": 32,
+      "density_weight": 1,
+      "holdout_mae": 0.530967488702139,
+      "baseline_calibrated_v1_holdout_mae": 0.6683297046300167,
+      "holdout_median_absolute_error": 0.4238830302546841,
+      "holdout_error80": 1.0,
+      "runtime_feature_range": [
+        1.3073328023763802,
+        9.896195529258279
+      ],
+      "below_training_range": 1,
+      "above_training_range": 3
+    },
+    "8": {
+      "charts": 322,
+      "train": 277,
+      "test": 45,
+      "train_groups": 197,
+      "test_groups": 37,
+      "overlapping_groups": 0,
+      "label_range": [
+        1.75,
+        24.75
+      ],
+      "train_cv_mae": 1.9153159695344897,
+      "baseline_train_cv_mae": 2.0718865581961508,
+      "bins": 32,
+      "density_weight": 0,
+      "holdout_mae": 1.2542034876758044,
+      "baseline_calibrated_v1_holdout_mae": 1.2923584176283425,
+      "holdout_median_absolute_error": 0.66431873531387,
+      "holdout_error80": 2.2470208290042386,
+      "runtime_feature_range": [
+        3.2841,
+        7.42041
+      ],
+      "below_training_range": 0,
+      "above_training_range": 0
+    }
+  }
+}

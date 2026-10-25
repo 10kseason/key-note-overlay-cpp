@@ -1,0 +1,1091 @@
+{
+  "version": 4,
+  "statistic": "mean of strongest three overlapping 8-second comparison-load windows per course; 2-second step; 4/7/8K use strain, 10K uses pattern load",
+  "assignment": "nearest reference band, midpoint boundaries; descending adjacent references pooled as a rank range",
+  "height": "low / mid low / level / high; half-band normalized below and above anchor; anchor = level; no height outside reference bounds",
+  "evaluation": "reference construction only; no held-out accuracy or player-clear prediction claimed",
+  "features_sha256": "ed12d770f15af937d591a66dad09c143f0bb90fe61adb656bf5b163a4c396655",
+  "profiles": {
+    "4": {
+      "name": "Reform v1",
+      "source": "https://www.danreform.com/",
+      "courses": 19,
+      "bands": [
+        {
+          "strain": 1.27999,
+          "low": -2,
+          "high": -2
+        },
+        {
+          "strain": 1.95534,
+          "low": -1,
+          "high": -1
+        },
+        {
+          "strain": 2.30838,
+          "low": 0,
+          "high": 0
+        },
+        {
+          "strain": 2.70441,
+          "low": 1,
+          "high": 1
+        },
+        {
+          "strain": 3.07757,
+          "low": 2,
+          "high": 2
+        },
+        {
+          "strain": 3.31275,
+          "low": 3,
+          "high": 3
+        },
+        {
+          "strain": 3.65329,
+          "low": 4,
+          "high": 4
+        },
+        {
+          "strain": 3.96069,
+          "low": 5,
+          "high": 5
+        },
+        {
+          "strain": 4.00894,
+          "low": 6,
+          "high": 6
+        },
+        {
+          "strain": 4.6159,
+          "low": 7,
+          "high": 7
+        },
+        {
+          "strain": 4.697744999999999,
+          "low": 8,
+          "high": 9
+        },
+        {
+          "strain": 4.91337,
+          "low": 10,
+          "high": 10
+        },
+        {
+          "strain": 5.14226,
+          "low": 11,
+          "high": 11
+        },
+        {
+          "strain": 5.48614,
+          "low": 12,
+          "high": 12
+        },
+        {
+          "strain": 5.80689,
+          "low": 13,
+          "high": 13
+        },
+        {
+          "strain": 6.12516,
+          "low": 14,
+          "high": 14
+        },
+        {
+          "strain": 6.63026,
+          "low": 15,
+          "high": 15
+        },
+        {
+          "strain": 8.68203,
+          "low": 16,
+          "high": 16
+        }
+      ],
+      "references": [
+        {
+          "keys": 4,
+          "rank": -2,
+          "sha256": "cd6562083c0021b682f9695db70e286c8656bd10a31cc8da3579884b3fce01dd",
+          "events_sha256": "a2dba5b840783376ec809b7d17279da0e5700cbc3746109aa63ab440b610e0cd",
+          "creator": "DDMythical",
+          "title": "Dan ~ REFORM ~ 1st Pack",
+          "version": "~ INTRO-1st ~ (Marathon)",
+          "notes": 1355,
+          "strain": 1.27999,
+          "nps": 4.95833
+        },
+        {
+          "keys": 4,
+          "rank": -1,
+          "sha256": "68e965cfbaaf6618ae96994fd487d8d7c86f1af558648b89cd624c3572aa9da9",
+          "events_sha256": "8aff1042e4de9a63a34c8a0c76937c90792dcdee54c3148a4ff4e51e87b0bbb4",
+          "creator": "DDMythical",
+          "title": "Dan ~ REFORM ~ 1st Pack",
+          "version": "~ INTRO-2nd ~ (Marathon)",
+          "notes": 1822,
+          "strain": 1.95534,
+          "nps": 7.95833
+        },
+        {
+          "keys": 4,
+          "rank": 0,
+          "sha256": "c8e6dfa79c8035d4fe62da653d15bf8fcd13c9c919e597fcea1fe820d966159e",
+          "events_sha256": "afad7c868d78f164d62758a2c98fef0aac212660dfed62aaf1e634ade41c6cae",
+          "creator": "DDMythical",
+          "title": "Dan ~ REFORM ~ 1st Pack",
+          "version": "~ INTRO-3rd ~ (Marathon)",
+          "notes": 2865,
+          "strain": 2.30838,
+          "nps": 10.0833
+        },
+        {
+          "keys": 4,
+          "rank": 1,
+          "sha256": "5adb6c6d96652335b4c6f6707b52406bf2f96b51912687fd60a0e9c5b3a32485",
+          "events_sha256": "33d1b39c277345acb58c693369e33c531f3743c49ee61ed94b68130c4fd3decc",
+          "creator": "DDMythical",
+          "title": "Dan ~ REFORM ~ 1st Pack",
+          "version": "~ 1st ~ (Marathon)",
+          "notes": 3695,
+          "strain": 2.70441,
+          "nps": 12.9583
+        },
+        {
+          "keys": 4,
+          "rank": 2,
+          "sha256": "39daf269e4ecf1734442771cbce26753d7cb20a671e71165af720b633ac6ecad",
+          "events_sha256": "13b521cab5d676d12714d5522dc3014df4415274e98bc35efa8a5538dc13e080",
+          "creator": "DDMythical",
+          "title": "Dan ~ REFORM ~ 1st Pack",
+          "version": "~ 2nd ~ (Marathon)",
+          "notes": 4458,
+          "strain": 3.07757,
+          "nps": 15.2083
+        },
+        {
+          "keys": 4,
+          "rank": 3,
+          "sha256": "6ca81d33157d55d5f7c6a3040292b00a85d7e49dbb7497a55407c10bb5ed22c3",
+          "events_sha256": "8e852a7d43712029e9fe7d213e95f35a647b7c3b588589b214aad4e1bccf5961",
+          "creator": "DDMythical",
+          "title": "Dan ~ REFORM ~ 1st Pack",
+          "version": "~ 3rd ~ (Marathon)",
+          "notes": 4321,
+          "strain": 3.31275,
+          "nps": 16.375
+        },
+        {
+          "keys": 4,
+          "rank": 4,
+          "sha256": "9a58e065a20ce405263f756b2f51a0c54e30d2a793ca926cb23be5946188d367",
+          "events_sha256": "5e6215c034d46dcb740e0e30ca8f06afeb4d89fdb1cfd1b722300f193a5ca69b",
+          "creator": "DDMythical",
+          "title": "Dan ~ REFORM ~ 1st Pack",
+          "version": "~ 4th ~ (Marathon)",
+          "notes": 5833,
+          "strain": 3.65329,
+          "nps": 17.5417
+        },
+        {
+          "keys": 4,
+          "rank": 5,
+          "sha256": "57ded740d281b24baea395822d08f7631b10805aaeee8f145c36ae74df6bd5c6",
+          "events_sha256": "025f0acfaf301cd60eaab0d6186895274b57e140b57f68cccee7ee624847db3f",
+          "creator": "DDMythical",
+          "title": "Dan ~ REFORM ~ 1st Pack",
+          "version": "~ 5th ~ (Marathon)",
+          "notes": 5816,
+          "strain": 3.96069,
+          "nps": 20.0
+        },
+        {
+          "keys": 4,
+          "rank": 6,
+          "sha256": "c7d08cd672d610100fe50227e7c851d56fe03c3cc1d951cc2f5c70bdd307af37",
+          "events_sha256": "172cecb311ef905ec053295a28f6b7a89475600a8c5499c8e41f06d8f82667d8",
+          "creator": "DDMythical",
+          "title": "Dan ~ REFORM ~ 2nd Pack",
+          "version": "~ 6th ~ (Marathon)",
+          "notes": 6317,
+          "strain": 4.00894,
+          "nps": 20.2917
+        },
+        {
+          "keys": 4,
+          "rank": 7,
+          "sha256": "df6add1b777f0c870e09ebefb5bf15d8074695906b0ba93926b6dee45e2307e8",
+          "events_sha256": "50979f9d311ef5ce6aeffa089026340b6a1f177910ce40618b880901fae55bdf",
+          "creator": "DDMythical",
+          "title": "Dan ~ REFORM ~ 2nd Pack",
+          "version": "~ 7th ~ (Marathon)",
+          "notes": 8032,
+          "strain": 4.6159,
+          "nps": 22.375
+        },
+        {
+          "keys": 4,
+          "rank": 8,
+          "sha256": "28cfcb8e4c46800661d0e0f5bb5e5d6dcdea8251c4410a5e217db8f78b40d1e7",
+          "events_sha256": "9b2d30a9245d140515896d4cc0cad5088fe65048dbc17e708938b2c0e8006349",
+          "creator": "DDMythical",
+          "title": "Dan ~ REFORM ~ 2nd Pack",
+          "version": "~ 8th ~ (Marathon)",
+          "notes": 6683,
+          "strain": 4.71557,
+          "nps": 22.8333
+        },
+        {
+          "keys": 4,
+          "rank": 9,
+          "sha256": "cc44f194b90368de7a708090a1cec3f20b4dfb9bd280fc42b84540163c30144b",
+          "events_sha256": "410f36cbfd28e640c00347fb1bd126b46dea1534b87613225facca22cb4c1006",
+          "creator": "DDMythical",
+          "title": "Dan ~ REFORM ~ 2nd Pack",
+          "version": "~ 9th ~ (Marathon)",
+          "notes": 8090,
+          "strain": 4.67992,
+          "nps": 23.5833
+        },
+        {
+          "keys": 4,
+          "rank": 10,
+          "sha256": "b8757f5ec6519a661b53688444b7e05797c98e78435d6baf1d34a49b56dd43b3",
+          "events_sha256": "f866159b77b53349faa770ed52c05b5686be27e2ed8273f16dff3932c3c9a278",
+          "creator": "DDMythical",
+          "title": "Dan ~ REFORM ~ 2nd Pack",
+          "version": "~ 10th ~ (Marathon)",
+          "notes": 7481,
+          "strain": 4.91337,
+          "nps": 24.4583
+        },
+        {
+          "keys": 4,
+          "rank": 11,
+          "sha256": "b827f1ab4ccfac41971c399a544ad004fdb43088744de1a46249e981cd01c0e9",
+          "events_sha256": "beb5a720b52e11de220c1cf2765ba029e3b90a9434cc0abce86d5abe820cb802",
+          "creator": "DDMythical",
+          "title": "Dan ~ REFORM ~ 2nd Pack",
+          "version": "~ EXTRA-ALPHA ~ (Marathon)",
+          "notes": 9420,
+          "strain": 5.14226,
+          "nps": 25.2083
+        },
+        {
+          "keys": 4,
+          "rank": 12,
+          "sha256": "d3f42352e303900780bf37547310e70cc3ab2225e7badca44940388b59d7a685",
+          "events_sha256": "de97450697b434b902aba01554a0c7e2aeccf836bb2e7ef6bd965e18ae53b77d",
+          "creator": "DDMythical",
+          "title": "Dan ~ REFORM ~ 2nd Pack",
+          "version": "~ EXTRA-BETA ~ (Marathon)",
+          "notes": 8624,
+          "strain": 5.48614,
+          "nps": 26.5833
+        },
+        {
+          "keys": 4,
+          "rank": 13,
+          "sha256": "600ca903777adc6d5a1a4d35dfb31bc9d3c9cf2152573bf1ecae512b3ec24d98",
+          "events_sha256": "5f14dd8bacfad2ffacedd8e5ebfd251ea5a3372ff888835ea8995e918500c79b",
+          "creator": "DDMythical",
+          "title": "Dan ~ REFORM ~ 2nd Pack",
+          "version": "~ EXTRA-GAMMA ~ (Marathon)",
+          "notes": 9312,
+          "strain": 5.80689,
+          "nps": 29.1667
+        },
+        {
+          "keys": 4,
+          "rank": 14,
+          "sha256": "4651144481e901eb9472812fc15bb47f1274c55b817815a57446d00dacf5b7aa",
+          "events_sha256": "1a55670b9f1f424f56412ebfb4fd1ab3c270ec48000ac0a3042996d9c6cce724",
+          "creator": "DDMythical",
+          "title": "Dan ~ REFORM ~ 2nd Pack",
+          "version": "~ EXTRA-DELTA ~ (Marathon)",
+          "notes": 10500,
+          "strain": 6.12516,
+          "nps": 31.25
+        },
+        {
+          "keys": 4,
+          "rank": 15,
+          "sha256": "5f5235b4099fe63d6b512fdfb9224692a1236616095082e4b24e5e6857dbbd15",
+          "events_sha256": "838f05891343f5ad9fbdf45668231595b30e32d511d41ab0e17ac9e0843c488b",
+          "creator": "DDMythical",
+          "title": "Dan ~ REFORM ~ 2nd Pack",
+          "version": "~ EXTRA-EPSILON ~ (Marathon)",
+          "notes": 9703,
+          "strain": 6.63026,
+          "nps": 34.1667
+        },
+        {
+          "keys": 4,
+          "rank": 16,
+          "sha256": "d98a45c709ec38c1d491bbb573ab26da27e5401006fa8c192e9ec94c389f97da",
+          "events_sha256": "4a61fffa21f8795970087b34fa32de30892104a9a7fd06ee92597bdffc651367",
+          "creator": "DDMythical",
+          "title": "Dan ~ REFORM ~ 3rd Pack",
+          "version": "~ EXTRA-ZETA ~ (Marathon)",
+          "notes": 11056,
+          "strain": 8.68203,
+          "nps": 39.5417
+        }
+      ]
+    },
+    "7": {
+      "name": "Jinjin Regular",
+      "source": "https://osu.ppy.sh/community/forums/topics/449279",
+      "courses": 15,
+      "bands": [
+        {
+          "strain": 3.4255,
+          "low": 0,
+          "high": 0
+        },
+        {
+          "strain": 3.54418,
+          "low": 1,
+          "high": 1
+        },
+        {
+          "strain": 3.9791,
+          "low": 2,
+          "high": 2
+        },
+        {
+          "strain": 4.575865,
+          "low": 3,
+          "high": 4
+        },
+        {
+          "strain": 4.69716,
+          "low": 5,
+          "high": 5
+        },
+        {
+          "strain": 5.08911,
+          "low": 6,
+          "high": 6
+        },
+        {
+          "strain": 5.56103,
+          "low": 7,
+          "high": 7
+        },
+        {
+          "strain": 5.9812,
+          "low": 8,
+          "high": 8
+        },
+        {
+          "strain": 6.39973,
+          "low": 9,
+          "high": 9
+        },
+        {
+          "strain": 6.55241,
+          "low": 10,
+          "high": 10
+        },
+        {
+          "strain": 6.86058,
+          "low": 11,
+          "high": 11
+        },
+        {
+          "strain": 7.15575,
+          "low": 12,
+          "high": 12
+        },
+        {
+          "strain": 7.57828,
+          "low": 13,
+          "high": 13
+        },
+        {
+          "strain": 8.53005,
+          "low": 14,
+          "high": 14
+        }
+      ],
+      "references": [
+        {
+          "keys": 7,
+          "rank": 0,
+          "sha256": "60dcca88070590d1b53cc4b6f7e82dc50a9ef77c31f31dfa5bb22aeb2d808d5d",
+          "events_sha256": "0ea61ff6660c6798bf157bab4e81355207b02b2172cbc688e0fcf9b6edcff7c3",
+          "creator": "Jinjin",
+          "title": "Regular Dan Phase I",
+          "version": "0th Dan (Marathon)",
+          "notes": 4115,
+          "strain": 3.4255,
+          "nps": 16.4167
+        },
+        {
+          "keys": 7,
+          "rank": 1,
+          "sha256": "87870841347df8ba0f5221e49eb67fef3c26b959b55ba760e4a566528b5386a8",
+          "events_sha256": "ba0421fe4307584a2f8abd88a21b49676d4b9ec9d97a467915b47c5decba26f1",
+          "creator": "Jinjin",
+          "title": "Regular Dan Phase I",
+          "version": "1st Dan (Marathon)",
+          "notes": 6235,
+          "strain": 3.54418,
+          "nps": 18.2083
+        },
+        {
+          "keys": 7,
+          "rank": 2,
+          "sha256": "57d70ed4e3069e4119f857e3c1de0ce60c4e4f55b0b61a254e6ac35282203896",
+          "events_sha256": "1cdcae9ea771743cc103074b9ad1b5854274014f52d50e9011c9f951fd34aca8",
+          "creator": "Jinjin",
+          "title": "Regular Dan Phase I",
+          "version": "2nd Dan (Marathon)",
+          "notes": 6800,
+          "strain": 3.9791,
+          "nps": 20.7083
+        },
+        {
+          "keys": 7,
+          "rank": 3,
+          "sha256": "7fc82f13de5a8db56b739569e55013e4ebdc49df69985f082cf28dc60ac4466a",
+          "events_sha256": "abfc1ddf17537bc3497573e937357237bbfc9bbb20f9a108772eb6ee527ae4a4",
+          "creator": "Jinjin",
+          "title": "Regular Dan Phase I",
+          "version": "3rd Dan (Marathon)",
+          "notes": 7729,
+          "strain": 4.6266,
+          "nps": 23.3333
+        },
+        {
+          "keys": 7,
+          "rank": 4,
+          "sha256": "d47372f728841f8981a6ec63d0118b60fd061c10c92a01efa2f477d36b23e297",
+          "events_sha256": "cb3cdf93c3c43062a319705bea2b3aabba8f9240f8a523db7a1d21722e9e0345",
+          "creator": "Jinjin",
+          "title": "Regular Dan Phase II",
+          "version": "4th Dan (Marathon)",
+          "notes": 8414,
+          "strain": 4.52513,
+          "nps": 23.8333
+        },
+        {
+          "keys": 7,
+          "rank": 5,
+          "sha256": "15f1e51840cac4303abaf12ca9ec30305a12c6bf236bba9e8ba3d1987defb2d8",
+          "events_sha256": "d3ea582e56258e33b4a3de3f4621d3421b15629dc5911fea00bc67d4b28d1afc",
+          "creator": "Jinjin",
+          "title": "Regular Dan Phase II",
+          "version": "5th Dan (Marathon)",
+          "notes": 8620,
+          "strain": 4.69716,
+          "nps": 24.875
+        },
+        {
+          "keys": 7,
+          "rank": 6,
+          "sha256": "b07836df6fc593c50156baaa944bf6b078a744daefe1faaa08f4ffc2e1c3979f",
+          "events_sha256": "70c388f55f906e0d203381fb8d27a4a01a730f91bfb090fea15b04071fcc3b36",
+          "creator": "Jinjin",
+          "title": "Regular Dan Phase II",
+          "version": "6th Dan (Marathon)",
+          "notes": 9765,
+          "strain": 5.08911,
+          "nps": 27.5
+        },
+        {
+          "keys": 7,
+          "rank": 7,
+          "sha256": "bde480e304a383a5fe60015813c8dd5d1cda733a34e0aafa552c712c4cad73e5",
+          "events_sha256": "939ca3b7860df9dedd06a2cb4550f62f8f906e99cc46ba01fd40df6282281c39",
+          "creator": "Jinjin",
+          "title": "Regular Dan Phase II",
+          "version": "7th Dan (Marathon)",
+          "notes": 10350,
+          "strain": 5.56103,
+          "nps": 30.1667
+        },
+        {
+          "keys": 7,
+          "rank": 8,
+          "sha256": "8a922a80f3246af2f19a4b6a4dee3c48a7cfccf44ac84849c7ca1ddd90cfec8f",
+          "events_sha256": "cd4de574ac20af32bf10f7fc42e91d1284463de03d8193489c1da089d2756d72",
+          "creator": "Jinjin",
+          "title": "Regular Dan Phase II",
+          "version": "8th Dan (Marathon)",
+          "notes": 10635,
+          "strain": 5.9812,
+          "nps": 32.25
+        },
+        {
+          "keys": 7,
+          "rank": 9,
+          "sha256": "e98d8b78d4581dadc61e7dc6b362059b0d1344a447cc7470374db03a6131c304",
+          "events_sha256": "60f2b77233023ec035186aafaa438246ac724a7bbad1b44a2ee2fa44dc53295e",
+          "creator": "Jinjin",
+          "title": "Regular Dan Phase III",
+          "version": "9th Dan",
+          "notes": 10769,
+          "strain": 6.39973,
+          "nps": 35.625
+        },
+        {
+          "keys": 7,
+          "rank": 10,
+          "sha256": "d01b93efa936a0510cff7523e35880e2f9b8f939002990df76a02ca84b5f6f38",
+          "events_sha256": "ff06bff2491369bbbe3117a2e5cf1cbb762f00f3b2a15f48a500e08629fca67d",
+          "creator": "Jinjin",
+          "title": "Regular Dan Phase III",
+          "version": "10th Dan",
+          "notes": 11396,
+          "strain": 6.55241,
+          "nps": 36.9583
+        },
+        {
+          "keys": 7,
+          "rank": 11,
+          "sha256": "fd96784af98e2716c247979ef43791524d6ad3e75ad7357bdd38148b265cd417",
+          "events_sha256": "f9a92babd3c05c7767935fc429ac538b611c3a8a36c23d716ec863819503a472",
+          "creator": "Jinjin",
+          "title": "Regular Dan Phase III",
+          "version": "Gamma Dan",
+          "notes": 12003,
+          "strain": 6.86058,
+          "nps": 37.5
+        },
+        {
+          "keys": 7,
+          "rank": 12,
+          "sha256": "249c0ba35905aa4af074703e1ed1606dc37c27f31bfea390ec63e4fab2d8d53e",
+          "events_sha256": "625ae0dfe9b50a2d37090e8841386b0f3c324b6e4f679aab6f5947d86600aaaa",
+          "creator": "Jinjin",
+          "title": "Regular Dan Phase III",
+          "version": "Azimuth Dan",
+          "notes": 14219,
+          "strain": 7.15575,
+          "nps": 41.5833
+        },
+        {
+          "keys": 7,
+          "rank": 13,
+          "sha256": "731a60b53a1150695b2d839675c24974264b681b3aec2193ec0f532008ed5b3c",
+          "events_sha256": "44bad02760007f8bd3581b284cf83287a699c3f2154b6cf57feaf54462518aca",
+          "creator": "Jinjin",
+          "title": "Regular Dan Phase III",
+          "version": "Zenith Dan",
+          "notes": 14578,
+          "strain": 7.57828,
+          "nps": 42.25
+        },
+        {
+          "keys": 7,
+          "rank": 14,
+          "sha256": "2999a5f2136bb1effec8c6ee8a379ec1e3d5cd8f752cff2ac4308709443227a7",
+          "events_sha256": "66708d01b068e6bf2d69dc677ea3495f91f12573633302d1dd6409a1cbabf934",
+          "creator": "Jinjin",
+          "title": "Dan Phase IV",
+          "version": "Stellium Dan (Regular)",
+          "notes": 16384,
+          "strain": 8.53005,
+          "nps": 48.9167
+        }
+      ]
+    },
+    "8": {
+      "name": "HeavenUsurper 8K Regular v1",
+      "source": "https://osu.ppy.sh/beatmapsets/2336219",
+      "courses": 16,
+      "bands": [
+        {
+          "strain": 3.635765,
+          "low": 0,
+          "high": 1
+        },
+        {
+          "strain": 4.07263,
+          "low": 2,
+          "high": 2
+        },
+        {
+          "strain": 4.4518,
+          "low": 3,
+          "high": 3
+        },
+        {
+          "strain": 5.30816,
+          "low": 4,
+          "high": 4
+        },
+        {
+          "strain": 5.79237,
+          "low": 5,
+          "high": 5
+        },
+        {
+          "strain": 7.016666666666667,
+          "low": 6,
+          "high": 8
+        },
+        {
+          "strain": 7.194875,
+          "low": 9,
+          "high": 10
+        },
+        {
+          "strain": 7.23991,
+          "low": 11,
+          "high": 11
+        },
+        {
+          "strain": 7.97186,
+          "low": 12,
+          "high": 12
+        },
+        {
+          "strain": 8.147425,
+          "low": 13,
+          "high": 14
+        },
+        {
+          "strain": 8.8704,
+          "low": 15,
+          "high": 15
+        }
+      ],
+      "references": [
+        {
+          "keys": 8,
+          "rank": 0,
+          "sha256": "bebcf257383288fed156937ab7092efe2a0b0458e5a5f5633295c876295be8f8",
+          "events_sha256": "3670dbb1c0cadba2aa33563215350d3cfea2585c420d14fd198e0e22853fb793",
+          "creator": "HeavenUsurper",
+          "title": "osu!mania 8k Regular Dan Course v1 (Easy Pack)",
+          "version": "Regular-0th",
+          "notes": 5589,
+          "strain": 3.85457,
+          "nps": 18.875
+        },
+        {
+          "keys": 8,
+          "rank": 1,
+          "sha256": "4bf85d6124ae6b0f9e24e28e645d45021d3cae18379f234113a9617b1d3e1ccd",
+          "events_sha256": "6020f4edacfbbe34962295cf07e01640643b646df4667053c31c9b02f2923c20",
+          "creator": "HeavenUsurper",
+          "title": "osu!mania 8k Regular Dan Course v1 (Easy Pack)",
+          "version": "Regular-1st",
+          "notes": 5226,
+          "strain": 3.41696,
+          "nps": 16.7083
+        },
+        {
+          "keys": 8,
+          "rank": 2,
+          "sha256": "b98272412d41cb6396e69d606d316c2d47f5017a82b3eb3a0c89efce54cf38c6",
+          "events_sha256": "687238c9c40b254e7a348f12c99c78996e4e6ee9ad9041c5b140b51cff9a7e24",
+          "creator": "HeavenUsurper",
+          "title": "osu!mania 8k Regular Dan Course v1 (Easy Pack)",
+          "version": "Regular-2nd",
+          "notes": 7319,
+          "strain": 4.07263,
+          "nps": 20.5417
+        },
+        {
+          "keys": 8,
+          "rank": 3,
+          "sha256": "a339383c3ef01634ba84cda389fecd7209f591cba5a2c2788661453d46cd1471",
+          "events_sha256": "02399f937fceb67867645110c8b2f1d168873217546c85ad277553334b9db863",
+          "creator": "HeavenUsurper",
+          "title": "osu!mania 8k Regular Dan Course v1 (Easy Pack)",
+          "version": "Regular-3rd",
+          "notes": 8997,
+          "strain": 4.4518,
+          "nps": 23.8333
+        },
+        {
+          "keys": 8,
+          "rank": 4,
+          "sha256": "16a0a272504e19953e801396911d327b121fe62e3b17b673e68acbf9d7816540",
+          "events_sha256": "7ef7671330b4ea849e322483c2f38bb6b3710d40f0deb24f9ae32561402c25f1",
+          "creator": "HeavenUsurper",
+          "title": "osu!mania 8k Regular Dan Course v1 (Medium Pack)",
+          "version": "Regular-4th",
+          "notes": 9309,
+          "strain": 5.30816,
+          "nps": 27.9167
+        },
+        {
+          "keys": 8,
+          "rank": 5,
+          "sha256": "520c515faa41d977ff2fe9b7ab5861f7653147e9d46bc79726f89c91c29f9514",
+          "events_sha256": "790a5589971602428a83b42da5fe780ced87b4eacda9902741d7242f2d24a45e",
+          "creator": "HeavenUsurper",
+          "title": "osu!mania 8k Regular Dan Course v1 (Medium Pack)",
+          "version": "Regular-5th",
+          "notes": 10490,
+          "strain": 5.79237,
+          "nps": 30.5833
+        },
+        {
+          "keys": 8,
+          "rank": 6,
+          "sha256": "aaeabcc560790093c081bc3068a4cb37b6121b2c55f24b7ba163e20f8d723db4",
+          "events_sha256": "79eea2fd0213cbcea39a7e802a97ffccec0f69049bb3215fe4fed4f990a0ff5c",
+          "creator": "HeavenUsurper",
+          "title": "osu!mania 8k Regular Dan Course v1 (Medium Pack)",
+          "version": "Regular-6th",
+          "notes": 15961,
+          "strain": 7.79729,
+          "nps": 43.625
+        },
+        {
+          "keys": 8,
+          "rank": 7,
+          "sha256": "9f9d72c015757956423d247ba5a2c7ba076f42dd08e3e755725ac699d769e9bf",
+          "events_sha256": "53af165ccaf656a99e966116103a521c2b4a3769aef3288234845252e09aab55",
+          "creator": "HeavenUsurper",
+          "title": "osu!mania 8k Regular Dan Course v1 (Medium Pack)",
+          "version": "Regular-7th",
+          "notes": 10341,
+          "strain": 6.32429,
+          "nps": 35.0
+        },
+        {
+          "keys": 8,
+          "rank": 8,
+          "sha256": "49e9a7fa2e3545a8e459d18db09bbe4ce0c071d725c10c86189430e36d7db569",
+          "events_sha256": "7218b617f255c4b838b0785596cd577df66ae5fe99da7ae767f781bcbe9a5e38",
+          "creator": "HeavenUsurper",
+          "title": "osu!mania 8k Regular Dan Course v1 (Hard Pack)",
+          "version": "Regular-8th",
+          "notes": 13509,
+          "strain": 6.92842,
+          "nps": 36.9583
+        },
+        {
+          "keys": 8,
+          "rank": 9,
+          "sha256": "7a3b353c476b4508f5fc643a05a0037f1123a29cd11b3437ee6f0000486bc8e9",
+          "events_sha256": "3a1056ea4b44be82205afb2edc593b6dd63f33f807e389ac5ddc229f4df95bf1",
+          "creator": "HeavenUsurper",
+          "title": "osu!mania 8k Regular Dan Course v1 (Hard Pack)",
+          "version": "Regular-9th",
+          "notes": 15119,
+          "strain": 7.206,
+          "nps": 38.3333
+        },
+        {
+          "keys": 8,
+          "rank": 10,
+          "sha256": "65bfc35cb2b1a6b41e6cc510f23edec0d2788f000ef91aa2518c2b63a18bab17",
+          "events_sha256": "f8dba96e4ee6303b42791652d9876a4943fd0b949bf13ab75aec0f359d4b9d40",
+          "creator": "HeavenUsurper",
+          "title": "osu!mania 8k Regular Dan Course v1 (Hard Pack)",
+          "version": "Regular-10th",
+          "notes": 17301,
+          "strain": 7.18375,
+          "nps": 40.0417
+        },
+        {
+          "keys": 8,
+          "rank": 11,
+          "sha256": "c300215c1e7c6b1a912c864aadde3a25e7e186efbc493b8c65534241638a9f0e",
+          "events_sha256": "385ce8435d6b5ef21d8a1befe7638c1b6bb2fc4c6060228cf4580b8d7803b492",
+          "creator": "HeavenUsurper",
+          "title": "osu!mania 8k Regular Dan Course v1 (Insane Pack)",
+          "version": "Regular-Flare",
+          "notes": 18037,
+          "strain": 7.23991,
+          "nps": 40.0417
+        },
+        {
+          "keys": 8,
+          "rank": 12,
+          "sha256": "c1ac461e414bba254157b5295395b467415b1c7c5e712d11e98d8cbffdde0327",
+          "events_sha256": "5cf3e6c26e642047175f2e686d64e46c7fc2c83cdf6e52f626c4176df384ec3a",
+          "creator": "HeavenUsurper",
+          "title": "osu!mania 8k Regular Dan Course v1 (Insane Pack)",
+          "version": "Regular-Aqua",
+          "notes": 24138,
+          "strain": 7.97186,
+          "nps": 43.8333
+        },
+        {
+          "keys": 8,
+          "rank": 13,
+          "sha256": "e36f4739d7c1299fd4207f93a1f9ea19c4d3781d3638020c72a190828523827e",
+          "events_sha256": "a147c957ea883885f0ffac967bcaa2dda729d802b3adf29a761c8018fb565c7b",
+          "creator": "HeavenUsurper",
+          "title": "osu!mania 8k Regular Dan Course v1 (Insane Pack)",
+          "version": "Regular-Life",
+          "notes": 21570,
+          "strain": 8.45687,
+          "nps": 46.4583
+        },
+        {
+          "keys": 8,
+          "rank": 14,
+          "sha256": "8b62a66fedf649bdd5ae753237b9b9a58dff4ce8154948b7487eb25c2369ee00",
+          "events_sha256": "e6481d5252596dd3476b3ed77eff6c8b6d1291f711b816472d68a19e60ef2995",
+          "creator": "HeavenUsurper",
+          "title": "osu!mania 8k Regular Dan Course v1 (Extreme Pack)",
+          "version": "Regular-Oblatus",
+          "notes": 26888,
+          "strain": 7.83798,
+          "nps": 41.8333
+        },
+        {
+          "keys": 8,
+          "rank": 15,
+          "sha256": "c4f3165635c991fad7fb345c97c817c80f3f3c57678cecf0e012ded9dd0ad768",
+          "events_sha256": "3c01adcd7022dc6462f5360ba8baf85a62cf0d203fa0fa74d63a9e3f62e4b1aa",
+          "creator": "HeavenUsurper",
+          "title": "osu!mania 8k Regular Dan Course v1 (Extreme Pack)",
+          "version": "Regular-Demise",
+          "notes": 23794,
+          "strain": 8.8704,
+          "nps": 45.0
+        }
+      ],
+      "extra_labels": {
+        "11": "Flare",
+        "12": "Aqua",
+        "13": "Life",
+        "14": "Oblatus",
+        "15": "Demise"
+      },
+      "pack_sources": [
+        "https://osu.ppy.sh/beatmapsets/2336219",
+        "https://osu.ppy.sh/beatmapsets/2338305",
+        "https://osu.ppy.sh/beatmapsets/2593505",
+        "https://osu.ppy.sh/beatmapsets/2595237",
+        "https://osu.ppy.sh/beatmapsets/2596836"
+      ]
+    },
+    "10": {
+      "name": "Tryr 10K BMS Dans Phase I-III",
+      "source": "https://osu.ppy.sh/beatmapsets/1093043",
+      "courses": 12,
+      "bands": [
+        {
+          "strain": 4.34642,
+          "low": 1,
+          "high": 1
+        },
+        {
+          "strain": 6.02042,
+          "low": 2,
+          "high": 2
+        },
+        {
+          "strain": 6.92009,
+          "low": 3,
+          "high": 3
+        },
+        {
+          "strain": 8.06968,
+          "low": 4,
+          "high": 4
+        },
+        {
+          "strain": 10.9759,
+          "low": 5,
+          "high": 5
+        },
+        {
+          "strain": 11.2286,
+          "low": 6,
+          "high": 6
+        },
+        {
+          "strain": 11.5188,
+          "low": 7,
+          "high": 7
+        },
+        {
+          "strain": 14.1583,
+          "low": 8,
+          "high": 8
+        },
+        {
+          "strain": 15.6997,
+          "low": 9,
+          "high": 9
+        },
+        {
+          "strain": 16.1435,
+          "low": 10,
+          "high": 10
+        },
+        {
+          "strain": 17.067,
+          "low": 11,
+          "high": 11
+        },
+        {
+          "strain": 21.6607,
+          "low": 12,
+          "high": 12
+        }
+      ],
+      "references": [
+        {
+          "keys": 10,
+          "rank": 1,
+          "sha256": "2fb2608e2264bbe65942c14c40998eae45e12b85889d01c5579a44307c881149",
+          "events_sha256": "fce60afa4409bce3f5446d4468efabf553fa6621c778fc497c9714c431a71b95",
+          "creator": "Tryr",
+          "title": "10K BMS Dans Phase I",
+          "version": "Dan 1",
+          "notes": 1099,
+          "strain": 4.34642,
+          "nps": 3.25
+        },
+        {
+          "keys": 10,
+          "rank": 2,
+          "sha256": "fb97a873e3a21ebc5b6047f6dbf7dedd557aba9554ace5a822e418774a800cc8",
+          "events_sha256": "65579854388a191f9ecc370502065169115736eee9739b6216e6b03ba5eb2e64",
+          "creator": "Tryr",
+          "title": "10K BMS Dans Phase I",
+          "version": "Dan 2",
+          "notes": 2017,
+          "strain": 6.02042,
+          "nps": 6.33333
+        },
+        {
+          "keys": 10,
+          "rank": 3,
+          "sha256": "bbd887c64d5602a491c7ef7e4e19a06338fcde23e3c5a7d5c826fb33804cd38d",
+          "events_sha256": "58eb64b91ef9c5eeb9a09853a3f05aa196d88ed2df803b50da74653d7f4507fc",
+          "creator": "Tryr",
+          "title": "10K BMS Dans Phase I",
+          "version": "Dan 3",
+          "notes": 3077,
+          "strain": 6.92009,
+          "nps": 9.04167
+        },
+        {
+          "keys": 10,
+          "rank": 4,
+          "sha256": "a7e6699976224f6071cd880aacab84f8f6af507f622bd4896f7c779195b8177f",
+          "events_sha256": "ff76b72e5c5af98fb76ef123c872b5201a12c6398ab6d0c4931816aa411ff667",
+          "creator": "Tryr",
+          "title": "10K BMS Dans Phase I",
+          "version": "Dan 4",
+          "notes": 3686,
+          "strain": 8.06968,
+          "nps": 9.5
+        },
+        {
+          "keys": 10,
+          "rank": 5,
+          "sha256": "b5501033820dd3e9d46f4cf4196f3fd390677ef09d8d08cd43b643579b7cae0e",
+          "events_sha256": "d76a8a1a003968611c3c39ff115ee29ed4a4e9ddf7fc1eb0a69ae591acaf032c",
+          "creator": "Tryr",
+          "title": "10K BMS Dans Phase II",
+          "version": "Dan 5",
+          "notes": 4968,
+          "strain": 10.9759,
+          "nps": 17.0
+        },
+        {
+          "keys": 10,
+          "rank": 6,
+          "sha256": "8a3bbc0c3f76e425b7c037c273ff5ab3333836e26967f92340dd9ac1158369b1",
+          "events_sha256": "296c39c21c634478884e54d945ff43f9aaedd96109f377a533405adf99680ba8",
+          "creator": "Tryr",
+          "title": "10K BMS Dans Phase II",
+          "version": "Dan 6",
+          "notes": 4596,
+          "strain": 11.2286,
+          "nps": 13.9167
+        },
+        {
+          "keys": 10,
+          "rank": 7,
+          "sha256": "b13f073001736d02e1b1108b514c5b857093052b9c4d8682be9c6e5a78d7b09e",
+          "events_sha256": "76a41a9d7643d73a196104aad917c662a9c41cdb78b5096ec16a57c870a575cd",
+          "creator": "Tryr",
+          "title": "10K BMS Dans Phase II",
+          "version": "Dan 7",
+          "notes": 5389,
+          "strain": 11.5188,
+          "nps": 15.5833
+        },
+        {
+          "keys": 10,
+          "rank": 8,
+          "sha256": "9920ab9e5ec33577c3be9fcc2512be80387283a7f1c56e73d2f8269fa3337fb5",
+          "events_sha256": "86d9ff8d9a3841e1bdd1f7dda00435b0faca36fe8c6b3432e9b33adfe1deebb7",
+          "creator": "Tryr",
+          "title": "10K BMS Dans Phase II",
+          "version": "Dan 8",
+          "notes": 7229,
+          "strain": 14.1583,
+          "nps": 20.0417
+        },
+        {
+          "keys": 10,
+          "rank": 9,
+          "sha256": "9f6da7ee53271a0bb46ea5072887b1c992feef892b33c2ffb126b477e2f5ad1b",
+          "events_sha256": "739e763dcbf25d6aa800062a68287d41b3634a4183dde87caa992dae7eeae499",
+          "creator": "Tryr",
+          "title": "10K BMS Dans Phase III",
+          "version": "Dan 9",
+          "notes": 7528,
+          "strain": 15.6997,
+          "nps": 21.9167
+        },
+        {
+          "keys": 10,
+          "rank": 10,
+          "sha256": "beefa1b2e8fc72574f549bed3ce3bcfbe8ac3c1dca3131c953e5a4c905153c40",
+          "events_sha256": "985686562451b938b0c26befada98e4a3b9437f050a368f227549897c0767a8d",
+          "creator": "Tryr",
+          "title": "10K BMS Dans Phase III",
+          "version": "Dan 10",
+          "notes": 7766,
+          "strain": 16.1435,
+          "nps": 27.4167
+        },
+        {
+          "keys": 10,
+          "rank": 11,
+          "sha256": "fedf421ec15865a209f3cfc6202de0cfdfa8b540116720abc12daf23f6cffdc1",
+          "events_sha256": "36b7f7f1c7a438f2aa9245dd56b103df9959eed5bc1ecf100797b7c92a2502fb",
+          "creator": "Tryr",
+          "title": "10K BMS Dans Phase III",
+          "version": "Kaiden",
+          "notes": 9334,
+          "strain": 17.067,
+          "nps": 24.7917
+        },
+        {
+          "keys": 10,
+          "rank": 12,
+          "sha256": "674dfd79764116dd56c1f45cc52aa4c1af307c45e2f6c429ac8cb24bd77b8d56",
+          "events_sha256": "4fe2a0732d2144318ad0d137fc35a74255b067f65ae114cdfde6515abbed5a4f",
+          "creator": "Tryr",
+          "title": "10K BMS Dans Phase III",
+          "version": "Catastrophe",
+          "notes": 10943,
+          "strain": 21.6607,
+          "nps": 37.375
+        }
+      ],
+      "metric": "stars + 1.6*pattern_variety + 0.5*rhythm_complexity + 0.4*column_repeat_load + 0.1*adjacent_repeat_load",
+      "evaluation": "weights calibrated on these 12 courses; individual reference separation is not held-out accuracy or clear prediction",
+      "extra_labels": {
+        "11": "Kaiden",
+        "12": "Catastrophe"
+      },
+      "rank_note": "11/12 are ordering indices for named courses, not numeric Dan labels",
+      "pack_sources": [
+        "https://osu.ppy.sh/beatmapsets/1093043",
+        "https://osu.ppy.sh/beatmapsets/1093064",
+        "https://osu.ppy.sh/beatmapsets/1093066"
+      ]
+    }
+  }
+}

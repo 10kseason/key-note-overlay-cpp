@@ -1,12 +1,12 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-cmake -S . -B build-cpp-ninja -G Ninja -DCMAKE_CXX_COMPILER=C:/msys64/mingw64/bin/g++.exe
+cmake -S . -B build-cpp-settings -G Ninja -DCMAKE_CXX_COMPILER=C:/msys64/mingw64/bin/g++.exe
 if errorlevel 1 goto fail
-cmake --build build-cpp-ninja --target key_note_overlay_cpp
+cmake --build build-cpp-settings
 if errorlevel 1 goto fail
 echo.
-echo Built: %~dp0build-cpp-ninja\key_note_overlay_cpp.exe
+echo Built: %~dp0build-cpp-settings\key_note_overlay_cpp.exe
 exit /b 0
 
 :fail

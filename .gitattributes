@@ -1,0 +1,3 @@
+# Preserve upstream license notices; their original whitespace is not code style.
+third_party/*.txt -whitespace
+third_party/toolchain/*.txt -whitespace
