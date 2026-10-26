@@ -26,7 +26,7 @@ Qwilight의 창 구현 근거: [MainWindow.SetWindowedMode, commit 6d3887f](http
 
 이 수정은 독립 오버레이 창이 숨겨지지 않게 하는 것이다. Discord에서 **osu!/Qwilight 게임 창만 공유**하면 별도 오버레이가 자동 합성되지 않는다. 게임과 오버레이만 함께 내보내려면 OBS에서 두 창을 합성한 화면을 공유해야 한다. 실제 Discord 캡처 목록·전송 결과는 별도 확인이 필요하다.
 
-전경 창의 프로세스 실행 파일 경로만 조회하고 잠시 캐시한다. 창 제목, 게임 메모리, 채보, 판정은 읽지 않으며 프로세스 경로를 리포트에 저장하지 않는다. 기존 키보드 훅은 입력을 다음 훅으로 전달한다. DLL 주입·입력 재전송·게임 렌더러 수정은 없다.
+이 게임용 모드 자체는 전경 창의 프로세스 실행 파일 경로만 조회하고 잠시 캐시한다. 창 제목, 게임 메모리, 채보, 판정은 읽지 않으며 프로세스 경로를 리포트에 저장하지 않는다. 별도 **osu! 연동** 옵션을 직접 켠 경우에만 메모리에서 채보를 식별하고 파일을 분석한다. 해당 옵션은 기본 OFF이며 [별도 위험 안내](osu-link.md)를 따른다. 기존 키보드 훅은 입력을 다음 훅으로 전달한다. DLL 주입·입력 재전송·게임 렌더러 수정은 없다.
 
 Win32 근거: [계층 창과 마우스 통과](https://learn.microsoft.com/en-us/windows/win32/winmsg/window-features#layered-windows), [SetWindowPos의 HWND_TOPMOST와 SWP_NOACTIVATE](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos).
 

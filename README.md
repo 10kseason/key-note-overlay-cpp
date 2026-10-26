@@ -2,6 +2,10 @@
 
 Windows rhythm-game key overlay for OBS, osu!, and Qwilight. It captures configured keyboard lanes with a low-level Win32 keyboard hook and renders notes in a straight lane layout. Unregistered keys are ignored before rendering.
 
+## 이 기능의 위험부담은 전부 사용자 몫입니다!!!
+
+**실험적인 osu! 선곡 연동은 게임 프로세스 메모리를 읽습니다. 안티치트 제재·계정 불이익이 없다고 보장하지 않습니다. 기본 OFF이며, 앱을 다시 켤 때마다 OFF입니다.** 설정의 별도 위험 확인을 거쳐야 켜집니다. [범위·사용 방법·읽기 전용 경계](docs/osu-link.md)를 먼저 확인하세요. 기존 독립 오버레이는 이 옵션을 켜지 않고 사용할 수 있습니다.
+
 Download the portable Windows x64 ZIP from [Releases](https://github.com/10kseason/key-note-overlay-cpp/releases). Extract it to a writable folder and run `KeyNoteOverlayCpp.exe`. Keep the included license notices with the executable. Project code is [MIT licensed](LICENSE); see [privacy and third-party notices](docs/privacy-and-licenses.md).
 
 ## Features
@@ -9,7 +13,8 @@ Download the portable Windows x64 ZIP from [Releases](https://github.com/10kseas
 - Low-latency native C++/Win32 implementation
 - Opt-in osu!/Qwilight mode: remain visible and on top when switching to Discord/OBS, pass mouse clicks through, and ignore input from other apps
 - Initial settings placement avoids the saved overlay and stays within the monitor work area when space permits
-- Korean settings UI with keyboard, position/OBS, appearance/motion, difficulty, and key color tabs
+- Korean settings UI with keyboard, position/OBS, appearance/motion, difficulty, key color, and osu! link tabs
+- Session-only opt-in osu! stable selected-chart display: original key count and estimated file difficulty, with a prominent risk warning and default OFF on every launch
 - Large live difficulty, completed-pattern result, and current NPS cards in settings and an optional OBS HUD
 - Opt-in local session reports: NPS/difficulty graphs, lane timing timeline, peak-window summary, and automatic HTML saving after ten seconds of inactivity
 - Dan course comparisons for 4K Reform v1, 7K Jinjin Regular, 8K Regular v1, and 10K Revive 2026 (1–14, Kaiden, OVERJOY), with low / mid low / 수준 / high bands
@@ -35,10 +40,12 @@ Download the portable Windows x64 ZIP from [Releases](https://github.com/10kseas
 - Adjustable overlay position, size, note travel, and release fade
 - Always-on-top and click-through overlay options
 - Separate capture-safe overlay/settings windows for OBS
-- Tray icon while running: click to open settings, right-click for settings or exit
+- Tray icon while running: click to open settings, right-click for a foreground menu even when settings are minimized; the overlay yields to settings and their dialogs while editing
 - One exit path closes the overlay, settings window, keyboard hook, and tray icon together
 
 ## Build
+
+별도 파일 분석 앱 **ChartDifficultyCalculator v0.1.0**도 같은 릴리즈의 ZIP으로 제공합니다. `.osu` 또는 지원되는 BMS를 직접 골라 구간 그래프와 난이도 요약을 확인하며 게임 메모리를 읽지 않습니다. [계산기 소스·지원 범위·빌드 안내](https://github.com/10kseason/key-note-overlay-cpp/tree/main/difficulty-calculator)를 참고하세요.
 
 Requirements:
 
@@ -70,13 +77,14 @@ Use `run_cpp_overlay.bat` to start the new build from the repository directory a
 
 ## Usage
 
-설정은 다섯 탭으로 나뉩니다.
+설정은 여섯 탭으로 나뉩니다.
 
 - **키 배치**: 4K~10K 프리셋, 순서대로 키 등록, 선택 키 변경, 순서 이동, 삭제, 쉼표로 직접 입력.
 - **위치 · OBS**: osu!·Qwilight 게임용 모드, 드래그 이동·위치 자동 저장, 좌표와 크기, 현재 모니터 중앙 배치, 마우스 클릭 통과, 항상 위, 위치 확인용 배경.
 - **모양 · 움직임**: Classic/Neon/Minimal, 노트 크기, 레인 간격, 불투명도, 롱노트 진하기, 이동 거리와 사라지는 시간, 모양 옵션.
 - **난이도**: 최근 입력의 추정 점수와 세부 지표, 분석 켜기/끄기, OBS 표시, 분석 초기화.
 - **키 색상**: 키별 색상 선택·HEX 입력, 불투명도 0~100%, 미리보기, 선택 키 기본값.
+- **osu! 연동**: 위험 안내 확인 후 이번 실행에서만 선곡 읽기 켜기, 즉시 끄기, Songs 폴더 지정. 매 실행 기본 OFF.
 
 ### 키 배치 편집
 

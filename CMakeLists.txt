@@ -8,7 +8,11 @@ add_executable(key_note_overlay_cpp WIN32
     src/mania_strain.cpp
     src/dan_rating.cpp
     src/session_report.cpp
+    src/osu_link.cpp
+    difficulty-calculator/src/chart_reader.cpp
+    difficulty-calculator/src/analysis.cpp
 )
+target_include_directories(key_note_overlay_cpp PRIVATE src difficulty-calculator/src)
 
 target_compile_features(key_note_overlay_cpp PRIVATE cxx_std_17)
 target_compile_definitions(key_note_overlay_cpp PRIVATE
@@ -23,6 +27,8 @@ target_link_libraries(key_note_overlay_cpp PRIVATE
     comctl32
     shell32
     comdlg32
+    advapi32
+    ole32
 )
 
 if(MSVC)
@@ -36,6 +42,22 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(osu_link_test tests/osu_link_test.cpp src/osu_link.cpp
+        difficulty-calculator/src/chart_reader.cpp difficulty-calculator/src/analysis.cpp
+        src/pattern_difficulty.cpp src/mania_strain.cpp src/dan_rating.cpp)
+    target_include_directories(osu_link_test PRIVATE src difficulty-calculator/src)
+    target_compile_features(osu_link_test PRIVATE cxx_std_17)
+    target_compile_definitions(osu_link_test PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(osu_link_test PRIVATE advapi32)
+    if(MINGW)
+        target_compile_options(osu_link_test PRIVATE -Wall -Wextra)
+        target_link_options(osu_link_test PRIVATE -static -static-libgcc -static-libstdc++)
+    endif()
+    if(MSVC)
+        target_compile_options(osu_link_test PRIVATE /utf-8)
+    endif()
+    add_test(NAME osu_link_boundaries COMMAND osu_link_test)
+    set_tests_properties(osu_link_boundaries PROPERTIES TIMEOUT 30)
     add_executable(game_overlay_test tests/game_overlay_test.cpp)
     target_compile_features(game_overlay_test PRIVATE cxx_std_17)
     target_include_directories(game_overlay_test PRIVATE src)

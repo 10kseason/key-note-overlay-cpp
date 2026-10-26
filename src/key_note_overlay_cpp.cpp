@@ -15,6 +15,7 @@
 #include <commctrl.h>
 #include <shellapi.h>
 #include <commdlg.h>
+#include <shlobj.h>
 #include "alpha_surface.h"
 #include "pattern_difficulty.h"
 #include "dan_rating.h"
@@ -22,6 +23,7 @@
 #include "game_overlay.h"
 #include "self_test_io.h"
 #include "window_placement.h"
+#include "osu_link.h"
 
 #include <algorithm>
 #include <array>
@@ -117,6 +119,13 @@ constexpr int IDC_REPORT_RETRY = 1064;
 constexpr int IDC_REPORT_STATUS = 1065;
 constexpr int IDC_GAME_OVERLAY = 1066;
 constexpr int IDC_GAME_STATUS = 1067;
+constexpr int IDC_OSU_ENABLE = 1068;
+constexpr int IDC_OSU_WARNING = 1069;
+constexpr int IDC_OSU_STATUS = 1070;
+constexpr int IDC_OSU_TITLE = 1071;
+constexpr int IDC_OSU_RATING = 1072;
+constexpr int IDC_OSU_DETAILS = 1073;
+constexpr int IDC_OSU_FOLDER = 1074;
 
 constexpr double kHoldThresholdMs = 90.0;
 constexpr double kChordAlignWindowMs = 15.0;
@@ -205,6 +214,7 @@ HFONT gKeyFont = nullptr;
 HFONT gHudValueFont = nullptr;
 HFONT gHudSmallFont = nullptr;
 HFONT gHudLabelFont = nullptr;
+HFONT gOsuWarningFont = nullptr;
 Config gConfig;
 Config gSavedConfig;
 bool gFillingControls = false;
@@ -220,15 +230,22 @@ bool gCloseInProgress = false;
 bool gPickingColor = false;
 bool gTrayAdded = false;
 bool gTrayVersion4 = false;
+bool gTrayMenuActive = false;
+bool gSettingsForegroundBoost = false;
 UINT gTaskbarCreatedMessage = 0;
 NOTIFYICONDATAW gTrayIcon{};
 // Native API boundaries also let lifecycle tests run without altering the tray
 // or showing a modal dialog. Normal execution uses the Windows APIs directly.
 auto gNotifyIcon = &Shell_NotifyIconW;
 auto gExitMessageBox = &MessageBoxW;
+auto gTrackTrayMenu = &TrackPopupMenu;
 int gBuildingPage = -1;
 int gCurrentPage = 0;
-std::array<std::vector<HWND>, 5> gPageControls;
+std::array<std::vector<HWND>, 6> gPageControls;
+osu_link::Session gOsuLink;
+osu_link::View gOsuView;
+std::filesystem::path gOsuSongsOverride;
+auto gOsuRiskMessageBox = &MessageBoxW;
 pattern::DifficultyEstimator gDifficulty;
 pattern::Snapshot gDifficultySnapshot;
 pattern::PatternSummary gPatternSummary;
@@ -312,7 +329,27 @@ UINT TrayEvent(WPARAM wParam, LPARAM lParam) {
     return gTrayAdded && id == TRAY_ICON_ID ? (gTrayVersion4 ? LOWORD(lParam) : static_cast<UINT>(lParam)) : 0;
 }
 
+bool IsSettingsInteraction(HWND window) {
+    return window && gSettingsWnd && GetAncestor(window, GA_ROOTOWNER) == gSettingsWnd;
+}
+
+void SetSettingsForegroundBoost(bool enabled) {
+    if (!IsWindow(gSettingsWnd) || (!enabled && !gSettingsForegroundBoost)) return;
+    gSettingsForegroundBoost = enabled;
+    // Settings need to clear our topmost overlay while being edited, but must
+    // return to the ordinary window band as soon as the user switches away.
+    SetWindowPos(gSettingsWnd, enabled ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
+bool MayRaiseGameOverlay(HWND foreground) {
+    // TrackPopupMenu runs a nested message loop: the normal overlay timer keeps
+    // firing there and would otherwise cover the menu (or an owned dialog).
+    return !gTrayMenuActive && !IsSettingsInteraction(foreground);
+}
+
 void ShowTrayMenu(HWND owner) {
+    if (gTrayMenuActive || !IsWindow(owner)) return;
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
     AppendMenuW(menu, MF_STRING, ID_TRAY_SETTINGS, L"설정 열기");
@@ -323,13 +360,26 @@ void ShowTrayMenu(HWND owner) {
     SetMenuDefaultItem(menu, ID_TRAY_SETTINGS, FALSE);
     POINT position{};
     GetCursorPos(&position);
-    SetForegroundWindow(owner);
-    const UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
-        position.x, position.y, 0, owner, nullptr);
+    // A minimized/hidden settings HWND cannot reliably foreground a tray menu.
+    // Use an independent, zero-area tool window in the topmost band. It exists
+    // only while the menu is open and never restores settings on right-click.
+    HWND menuOwner = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, L"STATIC", L"",
+        WS_POPUP, position.x, position.y, 0, 0, nullptr, nullptr, gInstance, nullptr);
+    if (!menuOwner) { DestroyMenu(menu); return; }
+    gTrayMenuActive = true;
+    if (!gUiSelfTest) {
+        ShowWindow(menuOwner, SW_SHOWNOACTIVATE);
+        SetForegroundWindow(menuOwner);
+    }
+    const UINT command = gTrackTrayMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
+        position.x, position.y, 0, menuOwner, nullptr);
+    PostMessageW(menuOwner, WM_NULL, 0, 0);
+    DestroyWindow(menuOwner);
     DestroyMenu(menu);
+    gTrayMenuActive = false;
     // Let the shell dismiss its menu tracking before processing a close request.
     PostMessageW(owner, WM_NULL, 0, 0);
-    if (command) PostMessageW(owner, WM_COMMAND, command, 0);
+    if (command && IsWindow(owner)) PostMessageW(owner, WM_COMMAND, command, 0);
     else if (gTrayAdded) gNotifyIcon(NIM_SETFOCUS, &gTrayIcon);
 }
 
@@ -1361,10 +1411,11 @@ void EnsureHudFonts() {
     if (!gHudValueFont) gHudValueFont = make(38, FW_BOLD);
     if (!gHudSmallFont) gHudSmallFont = make(22, FW_BOLD);
     if (!gHudLabelFont) gHudLabelFont = make(13, FW_NORMAL);
+    if (!gOsuWarningFont) gOsuWarningFont = make(28, FW_BOLD);
 }
 
 void DestroyHudFonts() {
-    for (HFONT* font : {&gHudValueFont, &gHudSmallFont, &gHudLabelFont}) {
+    for (HFONT* font : {&gHudValueFont, &gHudSmallFont, &gHudLabelFont, &gOsuWarningFont}) {
         if (*font) DeleteObject(*font);
         *font = nullptr;
     }
@@ -1487,7 +1538,53 @@ void RefreshReportStatus() {
     EnableWindow(GetDlgItem(gSettingsWnd, IDC_REPORT_RETRY), gReportSaveFailed);
 }
 
+void RefreshOsuLinkDisplay() {
+    const auto next=gOsuLink.Current();
+    const bool changed=next.enabled!=gOsuView.enabled || next.ready!=gOsuView.ready || next.status!=gOsuView.status ||
+        next.title!=gOsuView.title || next.variant!=gOsuView.variant || next.keys!=gOsuView.keys || next.difficulty!=gOsuView.difficulty;
+    gOsuView=next;
+    if(!changed) return;
+    SetDlgItemTextW(gSettingsWnd,IDC_OSU_STATUS,next.status.c_str());
+    SetDlgItemTextW(gSettingsWnd,IDC_OSU_TITLE,next.ready?(next.title+L" ["+next.variant+L"]").c_str():L"선택 채보 대기");
+    SetDlgItemTextW(gSettingsWnd,IDC_OSU_RATING,next.ready?(L"원본 "+std::to_wstring(next.keys)+L"K · 예상 "+next.difficulty).c_str():L"—");
+    SetDlgItemTextW(gSettingsWnd,IDC_OSU_DETAILS,next.ready?next.details.c_str():L"");
+    if(gOverlayWnd) InvalidateRect(gOverlayWnd,nullptr,FALSE);
+}
+
+void ToggleOsuLink() {
+    const bool enable=SendDlgItemMessageW(gSettingsWnd,IDC_OSU_ENABLE,BM_GETCHECK,0,0)==BST_CHECKED;
+    if(!enable) gOsuLink.Stop();
+    else {
+        const int choice=gOsuRiskMessageBox(gSettingsWnd,
+            L"이 기능의 위험부담은 전부 사용자 몫입니다!!!\n\n"
+            L"osu! 프로세스 메모리를 읽는 비공식 실험 기능입니다. 안티치트 제재나 계정 불이익이 없다고 보장하지 않습니다.\n\n"
+            L"메모리 수정·DLL 주입 없이 선택 채보 정보만 조회합니다. 이번 실행에서만 켜며, 재실행하면 OFF입니다.\n\n위험을 이해하고 켜겠습니까?",
+            L"위험 경고 · osu! 읽기 전용 연동",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2);
+        // UI self-tests must never attach to an unrelated running game.
+        if(choice!=IDYES || gUiSelfTest || !gOsuLink.Start(true,gOsuSongsOverride))
+            SendDlgItemMessageW(gSettingsWnd,IDC_OSU_ENABLE,BM_SETCHECK,BST_UNCHECKED,0);
+    }
+    RefreshOsuLinkDisplay();
+}
+
+void ChooseOsuSongs() {
+    // Folder changes stop an active reader; selecting a directory is not consent
+    // to resume process access. The checkbox requires the warning again.
+    const HRESULT initialized=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
+    BROWSEINFOW info{};info.hwndOwner=gSettingsWnd;info.lpszTitle=L"osu!의 Songs 폴더 선택 (이번 실행에만 적용)";
+    info.ulFlags=BIF_RETURNONLYFSDIRS|BIF_NONEWFOLDERBUTTON;
+    PIDLIST_ABSOLUTE item=SHBrowseForFolderW(&info);
+    wchar_t path[MAX_PATH]{};
+    if(item && SHGetPathFromIDListW(item,path)) {
+        gOsuLink.Stop();gOsuSongsOverride=path;
+        SendDlgItemMessageW(gSettingsWnd,IDC_OSU_ENABLE,BM_SETCHECK,BST_UNCHECKED,0);
+        RefreshOsuLinkDisplay();SetStatus(L"Songs 폴더를 지정했어요. 위험 안내를 확인하고 연동을 켜세요. 폴더 경로는 저장하지 않습니다.");
+    }
+    CoTaskMemFree(item);if(SUCCEEDED(initialized))CoUninitialize();
+}
+
 void RefreshDifficultyDisplay(double nowMs = NowMs()) {
+    RefreshOsuLinkDisplay();
     UpdateGameOverlay(nowMs);
     HWND headline = GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_SCORE);
     HWND metrics = GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_METRICS);
@@ -1528,14 +1625,19 @@ void RefreshDifficultyDisplay(double nowMs = NowMs()) {
 }
 
 int DifficultyHeaderHeight(int width, int height) {
-    if (!gConfig.difficultyEnabled || !gConfig.difficultyHud) return 0;
-    return width < 600 || height >= 180 ? 76 : 56;
+    const int live = gConfig.difficultyEnabled && gConfig.difficultyHud ? (width < 600 || height >= 180 ? 76 : 56) : 0;
+    // A very short overlay reuses the previous-pattern card instead of covering
+    // all input lanes with another row. Never resize the user's saved window.
+    const bool extra=gOsuView.enabled && (!live || height>=live+28+30);
+    return live + (extra ? 28 : 0);
 }
 
 void DrawDifficultyHud(HDC dc, int width, int headerHeight) {
     if (headerHeight == 0) return;
     EnsureHudFonts();
-    const bool large = width >= 500 && headerHeight >= 76;
+    const bool selectedRow=gOsuView.enabled && headerHeight!=56 && headerHeight!=76;
+    const int liveHeight=headerHeight-(selectedRow?28:0);
+    const bool large = width >= 500 && liveHeight >= 76;
     const COLORREF colors[] = {RGB(112, 229, 255), RGB(169, 245, 180), RGB(255, 222, 138)};
     std::wostringstream nps;
     nps << std::fixed << std::setprecision(1) << gDifficultySnapshot.currentNps;
@@ -1545,16 +1647,18 @@ void DrawDifficultyHud(HDC dc, int width, int headerHeight) {
         error << std::fixed << std::setprecision(1) << L" · 기존 ±" << gDifficultySnapshot.ratingError;
         label += error.str();
     }
-    const std::wstring labels[] = {label, L"아까 쳤던 패턴은:", L"NPS · 최근 1초"};
-    const std::wstring values[] = {DifficultyValue(), PreviousPatternValue(), nps.str()};
+    const bool selectedCard=gOsuView.enabled && !selectedRow;
+    const std::wstring labels[] = {label, selectedCard?L"osu! 원본 · 1.00× 모드 미반영":L"아까 쳤던 패턴은:", L"NPS · 최근 1초"};
+    const std::wstring selectedValue=gOsuView.ready?std::to_wstring(gOsuView.keys)+L"K · 예상 "+gOsuView.difficulty:L"채보 확인 중";
+    const std::wstring values[] = {DifficultyValue(), selectedCard?selectedValue:PreviousPatternValue(), nps.str()};
     HGDIOBJ oldFont = SelectObject(dc, gHudLabelFont ? gHudLabelFont : gGuiFont);
     SetBkMode(dc, TRANSPARENT);
     const int side = std::min(220, width / 4);
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; liveHeight>0 && i < 3; ++i) {
         const bool stacked = width < 600;
         RECT panel = stacked ? RECT{4, i == 0 ? 0 : i == 1 ? 24 : 52, width - 4, i == 0 ? 24 : i == 1 ? 52 : 76} :
             RECT{i == 0 ? 4 : i == 1 ? side + 2 : width - side + 2, 2,
-                i == 0 ? side - 2 : i == 1 ? width - side - 2 : width - 4, headerHeight - 2};
+                i == 0 ? side - 2 : i == 1 ? width - side - 2 : width - 4, liveHeight - 2};
         HBRUSH brush = CreateSolidBrush(RGB(10, 16, 26));
         FillRect(dc, &panel, brush); DeleteObject(brush);
         RECT accent{panel.left, panel.bottom - (stacked ? 1 : 3), panel.right, panel.bottom};
@@ -1578,6 +1682,14 @@ void DrawDifficultyHud(HDC dc, int width, int headerHeight) {
         SelectObject(dc, FitDifficultyFont(dc, values[i], number.right - number.left,
             large && !stacked && i != 1 ? gHudValueFont : gHudSmallFont));
         DrawTextW(dc, values[i].c_str(), -1, &number, DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+    }
+    if(selectedRow) {
+        RECT row{4,liveHeight+2,width-4,headerHeight-1};
+        HBRUSH brush=CreateSolidBrush(RGB(10,16,26));FillRect(dc,&row,brush);DeleteObject(brush);
+        SelectObject(dc,gHudLabelFont);SetTextColor(dc,RGB(184,207,255));
+        const auto text=gOsuView.ready?L"osu! 원본 "+std::to_wstring(gOsuView.keys)+L"K · 예상 "+gOsuView.difficulty+
+            L" · 1.00× 모드 미반영 · "+gOsuView.title+L" ["+gOsuView.variant+L"]":L"osu! · "+gOsuView.status;
+        row.left+=4;DrawTextW(dc,text.c_str(),-1,&row,DT_LEFT|DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
     }
     SelectObject(dc, oldFont);
 }
@@ -1640,6 +1752,7 @@ void ApplyOverlayWindowStyle() {
         gConfig.height,
         SWP_NOACTIVATE | SWP_FRAMECHANGED | (gUiSelfTest ? 0 : SWP_SHOWWINDOW)
     );
+    if (IsSettingsInteraction(GetForegroundWindow())) SetSettingsForegroundBoost(true);
     InvalidateRect(gOverlayWnd, nullptr, FALSE);
 }
 
@@ -1673,7 +1786,12 @@ void RefreshGameOverlay(game_overlay::Game game, double nowMs) {
     }
     const bool changed = game != gForegroundGame;
     gForegroundGame = game;
-    if (gConfig.gameOverlay && gOverlayWnd && !gUiSelfTest) {
+    const HWND foreground = GetForegroundWindow();
+    const bool editingSettings = IsSettingsInteraction(foreground);
+    // Alt-Tab back to an owned modal dialog need not reactivate the settings
+    // HWND itself. Reconcile once on that transition without stealing focus.
+    if (!gUiSelfTest && gSettingsForegroundBoost != editingSettings) SetSettingsForegroundBoost(editingSettings);
+    if (gConfig.gameOverlay && gOverlayWnd && !gUiSelfTest && MayRaiseGameOverlay(foreground)) {
         // Switching to Discord/OBS must not hide or suspend their capture source.
         // Foreground detection still filters input and releases old held notes.
         if (changed || nowMs >= gNextGameRaiseMs || !IsWindowVisible(gOverlayWnd)) {
@@ -2574,14 +2692,19 @@ HFONT CreateSettingsFont() {
 
 void ShowSettingsWindow() {
     if (gShuttingDown || !IsWindow(gSettingsWnd)) return;
+    SetSettingsForegroundBoost(true);
     ShowWindow(gSettingsWnd, IsIconic(gSettingsWnd) ? SW_RESTORE : SW_SHOW);
     SetForegroundWindow(gSettingsWnd);
+    // Windows can deny foreground activation. Do not leave a passive settings
+    // window permanently topmost when that happens.
+    if (!IsSettingsInteraction(GetForegroundWindow())) SetSettingsForegroundBoost(false);
 }
 
 void ShutdownApplication() {
     if (gShuttingDown) return;
     gShuttingDown = true;
     gAppRunning = false;
+    gOsuLink.Stop();gOsuView={};
     // Delete the shell icon while its callback HWND still exists. All normal
     // exits, partial startup failures and message-loop exits share this path.
     RemoveTrayIcon();
@@ -2637,7 +2760,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         MakeLabel(hwnd, L"Key Note Overlay  ·  설정", 18, 14, 680, 26);
         HWND tabs = TrackControl(CreateWindowW(WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS,
             18, 50, 684, 430, hwnd, reinterpret_cast<HMENU>(IDC_TABS), gInstance, nullptr));
-        const wchar_t* titles[] = {L"키 배치", L"위치 · OBS", L"모양 · 움직임", L"난이도", L"키 색상"};
+        const wchar_t* titles[] = {L"키 배치", L"위치 · OBS", L"모양 · 움직임", L"난이도", L"키 색상", L"osu! 연동"};
         for (int i = 0; i < static_cast<int>(gPageControls.size()); ++i) {
             TCITEMW item{}; item.mask = TCIF_TEXT; item.pszText = const_cast<wchar_t*>(titles[i]);
             TabCtrl_InsertItem(tabs, i, &item);
@@ -2741,6 +2864,18 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         MakeButton(hwnd, IDC_STYLE_PREVIEW, L"", 298, 282, 364, 68, BS_OWNERDRAW);
         MakeButton(hwnd, IDC_RESET_KEY_STYLE, L"선택 키 기본값", 298, 366, 364, 30);
         MakeLabel(hwnd, L"노트·롱노트·잔상에 함께 적용됩니다. 전체 불투명도와 곱해집니다.\n키 순서와 프리셋을 바꿔도 키별 설정을 유지합니다. [적용 + 저장]으로 기억해요.", 38, 420, 624, 54);
+        gBuildingPage = 5;
+        HWND warning=MakeLabel(hwnd,osu_link::RiskWarning,38,94,624,64,IDC_OSU_WARNING);
+        SendMessageW(warning,WM_SETFONT,reinterpret_cast<WPARAM>(gOsuWarningFont),TRUE);
+        MakeLabel(hwnd,L"비공식 메모리 조회 기능 · 안티치트 제재 및 계정 불이익이 없다고 보장하지 않습니다.\n기본 OFF이며 앱을 다시 켜면 반드시 OFF로 돌아갑니다.",38,163,624,44);
+        MakeButton(hwnd,IDC_OSU_ENABLE,L"위험 안내를 확인하고 이번 실행에서만 연동 켜기",38,215,624,28,BS_AUTOCHECKBOX);
+        MakeLabel(hwnd,L"OFF · 앱을 시작할 때마다 꺼져 있습니다.",38,251,624,44,IDC_OSU_STATUS);
+        MakeLabel(hwnd,L"선택 채보 대기",38,300,624,44,IDC_OSU_TITLE);
+        HWND rating=MakeLabel(hwnd,L"—",38,347,624,30,IDC_OSU_RATING);
+        SendMessageW(rating,WM_SETFONT,reinterpret_cast<WPARAM>(gHudSmallFont),TRUE);
+        MakeLabel(hwnd,L"",38,383,624,40,IDC_OSU_DETAILS);
+        MakeButton(hwnd,IDC_OSU_FOLDER,L"Songs 폴더 지정…",38,436,180,30);
+        MakeLabel(hwnd,L"stable 원본 1.00× · 모드/변환 미반영\n실제 입력 분석과 키 배치는 별도로 유지됩니다.",230,432,432,42);
         gBuildingPage = -1;
         MakeLabel(hwnd, L"", 18, 490, 684, 24, IDC_DIRTY);
         MakeButton(hwnd, IDC_APPLY, L"적용", 18, 520, 100, 32);
@@ -2759,6 +2894,13 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         if (wParam == TIMER_DIFFICULTY) RefreshDifficultyDisplay();
         if (wParam == TIMER_TRAY_RETRY && gAppRunning) AddTrayIcon();
         return 0;
+    case WM_CTLCOLORSTATIC:
+        if(GetDlgCtrlID(reinterpret_cast<HWND>(lParam))==IDC_OSU_WARNING) {
+            SetTextColor(reinterpret_cast<HDC>(wParam),RGB(200,20,20));
+            SetBkColor(reinterpret_cast<HDC>(wParam),GetSysColor(COLOR_BTNFACE));
+            return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_BTNFACE));
+        }
+        break;
     case WM_DRAWITEM:
         if (wParam == IDC_STYLE_PREVIEW) {
             const auto* draw = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
@@ -2807,6 +2949,8 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         if (event != BN_CLICKED) break;
         switch (id) {
+        case IDC_OSU_ENABLE: ToggleOsuLink(); return 0;
+        case IDC_OSU_FOLDER: ChooseOsuSongs(); return 0;
         case IDC_PICK_COLOR: PickKeyColor(); return 0;
         case IDC_RESET_KEY_STYLE:
             if (gStyleVk) { gDraftKeyStyles[gStyleVk] = {}; FillKeyStyleFields(); MarkEdited(); }
@@ -2874,7 +3018,13 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         break;
     }
     case WM_ACTIVATE:
-        if (LOWORD(wParam) == WA_INACTIVE) EndKeyCapture(true);
+        if (LOWORD(wParam) == WA_INACTIVE) {
+            EndKeyCapture(true);
+            if (!IsSettingsInteraction(reinterpret_cast<HWND>(lParam))) SetSettingsForegroundBoost(false);
+        } else SetSettingsForegroundBoost(true);
+        break;
+    case WM_ACTIVATEAPP:
+        if (!wParam) SetSettingsForegroundBoost(false);
         break;
     case WM_CLOSE:
         if (gCloseInProgress || gShuttingDown) return 0;
@@ -3066,6 +3216,17 @@ int RunUiSelfTest(bool blockFirstReport = false) {
     auto click = [&](int id) { SendMessageW(gSettingsWnd, WM_COMMAND, MAKEWPARAM(id, BN_CLICKED), reinterpret_cast<LPARAM>(GetDlgItem(gSettingsWnd, id))); };
     auto edit = [&](int id, const wchar_t* value) { SetWindowTextW(GetDlgItem(gSettingsWnd, id), value); };
     auto raw = [&]() { return WindowText(GetDlgItem(gSettingsWnd, IDC_LANES)); };
+    check("osu_link_defaults_off", !gOsuLink.Current().enabled &&
+        SendDlgItemMessageW(gSettingsWnd,IDC_OSU_ENABLE,BM_GETCHECK,0,0)==BST_UNCHECKED);
+    check("osu_risk_banner_visible_and_large", WindowText(GetDlgItem(gSettingsWnd,IDC_OSU_WARNING))==osu_link::RiskWarning &&
+        reinterpret_cast<HFONT>(SendDlgItemMessageW(gSettingsWnd,IDC_OSU_WARNING,WM_GETFONT,0,0))==gOsuWarningFont);
+    gOsuRiskMessageBox=+[](HWND,LPCWSTR text,LPCWSTR,UINT flags)->int {
+        return (wcsstr(text,osu_link::RiskWarning) && (flags&MB_DEFBUTTON2)) ? IDNO : IDYES;
+    };
+    SendDlgItemMessageW(gSettingsWnd,IDC_OSU_ENABLE,BM_SETCHECK,BST_CHECKED,0);click(IDC_OSU_ENABLE);
+    check("osu_warning_no_keeps_reader_off", !gOsuLink.Current().enabled &&
+        SendDlgItemMessageW(gSettingsWnd,IDC_OSU_ENABLE,BM_GETCHECK,0,0)==BST_UNCHECKED);
+    gOsuRiskMessageBox=&MessageBoxW;
     std::vector<std::wstring> tokens;
     std::wstring error;
     check("aliases_and_punctuation", ValidateLaneText(L" q,semicolon,comma,spacebar", tokens, error) && JoinLaneTokens(tokens) == L"Q,SEMICOLON,COMMA,SPACE");
@@ -3535,7 +3696,7 @@ int RunUiSelfTest(bool blockFirstReport = false) {
     gDifficultySnapshot.rating = 10.8;
     gDifficultySnapshot.outsideCalibration = 0;
     gDifficultySnapshot.currentNps = 48.0;
-    auto renderHud = [&](int width, int height, const wchar_t* name) {
+    auto renderHud = [&](int width, int height, const wchar_t* name, bool settings=false) {
         BITMAPINFO info{};
         info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         info.bmiHeader.biWidth = width; info.bmiHeader.biHeight = -height;
@@ -3546,7 +3707,8 @@ int RunUiSelfTest(bool blockFirstReport = false) {
         bool ok = dc && bitmap && pixels;
         if (ok) {
             HGDIOBJ oldBitmap = SelectObject(dc, bitmap);
-            DrawDifficultyHud(dc, width, height);
+            if(settings) SendMessageW(gSettingsWnd,WM_PRINT,reinterpret_cast<WPARAM>(dc),PRF_CLIENT|PRF_CHILDREN|PRF_ERASEBKGND);
+            else DrawDifficultyHud(dc, width, height);
             GdiFlush();
             BITMAPFILEHEADER header{};
             header.bfType = 0x4d42;
@@ -3555,14 +3717,32 @@ int RunUiSelfTest(bool blockFirstReport = false) {
             std::string bytes(reinterpret_cast<const char*>(&header), sizeof(header));
             bytes.append(reinterpret_cast<const char*>(&info.bmiHeader), sizeof(info.bmiHeader));
             bytes.append(static_cast<const char*>(pixels), width * height * 4);
-            ok = WriteTextFile(CurrentDirectory() + name, bytes);
+            if(settings) {
+                // A full settings bitmap exceeds the config writer's deliberate
+                // 1MiB read-back limit. This is an owned test image, not config.
+                std::ofstream output(std::filesystem::path(CurrentDirectory()+name),std::ios::binary);
+                output.write(bytes.data(),static_cast<std::streamsize>(bytes.size()));output.close();ok=!!output;
+            } else ok = WriteTextFile(CurrentDirectory() + name, bytes);
             SelectObject(dc, oldBitmap);
         }
         if (bitmap) DeleteObject(bitmap);
         if (dc) DeleteDC(dc);
         return ok;
     };
+    const auto priorPage=gCurrentPage;ShowSettingsPage(5);
+    RECT settingsBounds{};GetClientRect(gSettingsWnd,&settingsBounds);
+    check("osu_risk_settings_offscreen_render",renderHud(settingsBounds.right,settingsBounds.bottom,L"osu-risk-settings.bmp",true));
+    ShowSettingsPage(priorPage);
     check("hud_offscreen_layout_render", renderHud(900,76,L"hud-wide.bmp") && renderHud(240,76,L"hud-compact.bmp") && renderHud(600,56,L"hud-low.bmp"));
+    gOsuView.enabled=true;gOsuView.ready=true;gOsuView.keys=5;
+    gOsuView.title=L"선택 곡 미리보기";gOsuView.variant=L"5K Normal";gOsuView.difficulty=L"⑤7.2";
+    check("osu_selected_chart_hud_render", DifficultyHeaderHeight(900,220)==104 &&
+        renderHud(900,104,L"hud-osu-selection.bmp") && renderHud(240,104,L"hud-osu-selection-small.bmp"));
+    check("osu_short_overlay_preserves_lanes",DifficultyHeaderHeight(240,90)==76 && DifficultyHeaderHeight(900,90)==56 &&
+        renderHud(240,76,L"hud-osu-short.bmp"));
+    const bool liveEnabled=gConfig.difficultyEnabled;gConfig.difficultyEnabled=false;
+    check("osu_hud_independent_of_live_input", DifficultyHeaderHeight(900,220)==28 && renderHud(900,28,L"hud-osu-only.bmp"));
+    gConfig.difficultyEnabled=liveEnabled;gOsuView={};
     const auto previewLanes = gConfig.lanes;
     gConfig.lanes.resize(4);
     gDifficultySnapshot.profile = pattern::RatingProfile::Osu4;
@@ -3883,7 +4063,27 @@ struct LifecycleTestState {
     int adds = 0, deletes = 0, versions = 0, prompts = 0;
     int choice = IDCANCEL;
     bool failAdd = false, failVersion = false, deleteOwnerAlive = false;
+    int menuCalls = 0;
+    UINT menuCommand = 0;
+    HWND lastMenuOwner = nullptr;
+    bool menuBoundaryValid = false;
 } gLifecycleTest;
+
+BOOL WINAPI TestTrackTrayMenu(HMENU menu, UINT flags, int, int, int, HWND owner, const RECT*) {
+    ++gLifecycleTest.menuCalls;
+    gLifecycleTest.lastMenuOwner = owner;
+    RECT rect{}; GetWindowRect(owner, &rect);
+    gLifecycleTest.menuBoundaryValid = IsWindow(owner) && owner != gSettingsWnd &&
+        GetAncestor(owner, GA_ROOTOWNER) == owner &&
+        (GetWindowLongPtrW(owner, GWL_EXSTYLE) & (WS_EX_TOOLWINDOW | WS_EX_TOPMOST)) ==
+            (WS_EX_TOOLWINDOW | WS_EX_TOPMOST) &&
+        rect.left == rect.right && rect.top == rect.bottom &&
+        (flags & TPM_RETURNCMD) && GetMenuItemCount(menu) == 4 &&
+        !IsWindowVisible(gSettingsWnd) && !MayRaiseGameOverlay(nullptr);
+    // A tray callback can re-enter through TrackPopupMenu's nested loop.
+    ShowTrayMenu(gSettingsWnd);
+    return gLifecycleTest.menuCommand;
+}
 
 BOOL WINAPI TestNotifyIcon(DWORD action, PNOTIFYICONDATAW data) {
     if (action == NIM_ADD) { ++gLifecycleTest.adds; return !gLifecycleTest.failAdd; }
@@ -3902,7 +4102,40 @@ int WINAPI TestExitMessageBox(HWND, LPCWSTR, LPCWSTR, UINT) {
     return gLifecycleTest.choice;
 }
 
-int RunLifecycleSelfTest(bool realTray) {
+struct NativeMenuProbe {
+    bool visibleTopmost = false, foregroundOwner = false, trackingOwner = false, overlayRaiseBlocked = false;
+} gNativeMenuProbe;
+
+BOOL CALLBACK InspectNativeTrayMenu(HWND window, LPARAM) {
+    wchar_t name[32]{};
+    GetClassNameW(window, name, ARRAYSIZE(name));
+    if (wcscmp(name, L"#32768") == 0 && IsWindowVisible(window))
+        gNativeMenuProbe.visibleTopmost = (GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+    return TRUE;
+}
+
+void CALLBACK FinishNativeMenuProbe(HWND owner, UINT, UINT_PTR timer, DWORD) {
+    KillTimer(owner, timer);
+    EnumThreadWindows(GetCurrentThreadId(), InspectNativeTrayMenu, 0);
+    gNativeMenuProbe.foregroundOwner = GetForegroundWindow() == owner;
+    GUITHREADINFO info{}; info.cbSize = sizeof(info);
+    gNativeMenuProbe.trackingOwner = GetGUIThreadInfo(GetCurrentThreadId(), &info) && info.hwndMenuOwner == owner;
+    gConfig.gameOverlay = true;
+    gNextGameRaiseMs = 0;
+    RefreshGameOverlay(game_overlay::Game::None, NowMs());
+    gNativeMenuProbe.overlayRaiseBlocked = gNextGameRaiseMs == 0 && !IsWindowVisible(gOverlayWnd);
+    EndMenu(); // Close our own menu; no global mouse/keyboard input is generated.
+}
+
+BOOL WINAPI ProbeNativeTrayMenu(HMENU menu, UINT flags, int x, int y, int reserved, HWND owner, const RECT* rect) {
+    const UINT_PTR timer = SetTimer(owner, 1, 150, FinishNativeMenuProbe);
+    if (!timer) return 0;
+    const BOOL result = TrackPopupMenu(menu, flags, x, y, reserved, owner, rect);
+    KillTimer(owner, timer);
+    return result;
+}
+
+int RunLifecycleSelfTest(bool realTray, bool nativeMenu = false) {
     gUiSelfTest = true;
     InitCommonControls();
     gGuiFont = CreateSettingsFont();
@@ -3919,6 +4152,7 @@ int RunLifecycleSelfTest(bool realTray) {
         MSG quit{};
         while (PeekMessageW(&quit, nullptr, WM_QUIT, WM_QUIT, PM_REMOVE)) {}
         gShuttingDown = gCloseInProgress = gAppRunning = false;
+        gTrayMenuActive = gSettingsForegroundBoost = false;
         gUnapplied = gUnsaved = false;
         gLifecycleTest = {};
         gConfig = Config{};
@@ -3949,11 +4183,62 @@ int RunLifecycleSelfTest(bool realTray) {
         id.cbSize = sizeof(id); id.hWnd = settings; id.uID = TRAY_ICON_ID;
         RECT iconRect{};
         check("real_shell_icon_present", SUCCEEDED(Shell_NotifyIconGetRect(&id, &iconRect)));
+        if (nativeMenu) {
+            // Explicit desktop smoke only. A real popup is shown for 150 ms;
+            // the ordinary CTest path never shows or focuses a desktop window.
+            gUiSelfTest = false;
+            gTrackTrayMenu = &ProbeNativeTrayMenu;
+            ShowTrayMenu(settings);
+            gTrackTrayMenu = &TrackPopupMenu;
+            gUiSelfTest = true;
+            check("native_popup_visible_topmost", gNativeMenuProbe.visibleTopmost);
+            check("native_popup_tracking_owner", gNativeMenuProbe.trackingOwner);
+            // This synthetic invocation is not a user tray click. Windows may
+            // deny activation; record that fact rather than bypass focus rules.
+            log << "native_popup_foreground_granted=" << (gNativeMenuProbe.foregroundOwner ? "yes" : "no") << '\n';
+            check("native_popup_timer_cannot_raise_overlay", gNativeMenuProbe.overlayRaiseBlocked);
+            check("native_popup_leaves_settings_hidden", !IsWindowVisible(settings) && !gTrayMenuActive);
+        }
         SendMessageW(overlay, WM_CLOSE, 0, 0);
         check("real_exit_closes_both_windows", stopped(overlay, settings));
         check("real_shell_icon_removed", FAILED(Shell_NotifyIconGetRect(&id, &iconRect)));
     } else {
         check("tray_add_once", AddTrayIcon() && AddTrayIcon() && gLifecycleTest.adds == 1 && gLifecycleTest.versions == 1);
+        gTrackTrayMenu = &TestTrackTrayMenu;
+        ShowTrayMenu(settings);
+        check("tray_popup_independent_topmost_owner", gLifecycleTest.menuBoundaryValid && gLifecycleTest.menuCalls == 1);
+        check("tray_cancel_cleans_owner_and_raise_guard", !IsWindow(gLifecycleTest.lastMenuOwner) &&
+            !gTrayMenuActive && MayRaiseGameOverlay(nullptr) && !IsWindowVisible(settings));
+        // Model a minimized settings owner without showing any desktop window.
+        const LONG_PTR settingsStyle = GetWindowLongPtrW(settings, GWL_STYLE);
+        SetWindowLongPtrW(settings, GWL_STYLE, settingsStyle | WS_MINIMIZE);
+        gLifecycleTest.menuCommand = ID_TRAY_SETTINGS;
+        ShowTrayMenu(settings);
+        MSG menuCommand{};
+        check("tray_minimized_owner_dispatches_settings", gLifecycleTest.menuBoundaryValid &&
+            gLifecycleTest.menuCalls == 2 && IsIconic(settings) &&
+            PeekMessageW(&menuCommand, settings, WM_COMMAND, WM_COMMAND, PM_REMOVE) &&
+            menuCommand.wParam == ID_TRAY_SETTINGS && !IsWindow(gLifecycleTest.lastMenuOwner));
+        SetWindowLongPtrW(settings, GWL_STYLE, settingsStyle);
+        gTrackTrayMenu = &TrackPopupMenu;
+        HWND ownedDialog = CreateWindowExW(0, L"STATIC", L"", WS_POPUP,
+            0, 0, 0, 0, settings, nullptr, gInstance, nullptr);
+        check("settings_and_owned_dialog_block_overlay_raise", ownedDialog &&
+            !MayRaiseGameOverlay(settings) && !MayRaiseGameOverlay(GetDlgItem(settings, IDC_TABS)) &&
+            !MayRaiseGameOverlay(ownedDialog) && MayRaiseGameOverlay(overlay));
+        SendMessageW(settings, WM_ACTIVATE, WA_ACTIVE, 0);
+        check("settings_activation_enters_topmost_band", gSettingsForegroundBoost &&
+            (GetWindowLongPtrW(settings, GWL_EXSTYLE) & WS_EX_TOPMOST));
+        SendMessageW(settings, WM_ACTIVATE, WA_INACTIVE, reinterpret_cast<LPARAM>(ownedDialog));
+        check("settings_owned_dialog_keeps_boost", gSettingsForegroundBoost);
+        SendMessageW(settings, WM_ACTIVATEAPP, FALSE, 0);
+        check("switching_apps_removes_settings_topmost", !gSettingsForegroundBoost &&
+            !(GetWindowLongPtrW(settings, GWL_EXSTYLE) & WS_EX_TOPMOST));
+        SendMessageW(settings, WM_ACTIVATE, WA_ACTIVE, 0);
+        SendMessageW(settings, WM_ACTIVATE, WA_INACTIVE, reinterpret_cast<LPARAM>(overlay));
+        check("settings_deactivation_removes_boost", !gSettingsForegroundBoost &&
+            !(GetWindowLongPtrW(settings, GWL_EXSTYLE) & WS_EX_TOPMOST));
+        DestroyWindow(ownedDialog);
         check("tray_v4_mouse_keyboard_and_id", TrayEvent(0, MAKELPARAM(NIN_SELECT,TRAY_ICON_ID)) == NIN_SELECT &&
             TrayEvent(0, MAKELPARAM(NIN_KEYSELECT,TRAY_ICON_ID)) == NIN_KEYSELECT &&
             TrayEvent(0, MAKELPARAM(WM_CONTEXTMENU,TRAY_ICON_ID)) == WM_CONTEXTMENU && TrayEvent(0, MAKELPARAM(NIN_SELECT,99)) == 0);
@@ -4192,6 +4477,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int showCommand) {
         return RunCheckedSelfTest("lifecycle", [] { return RunLifecycleSelfTest(false); });
     if (command.find(L"--tray-smoke-test") != std::wstring::npos)
         return RunCheckedSelfTest("tray", [] { return RunLifecycleSelfTest(true); });
+    if (command.find(L"--tray-menu-smoke-test") != std::wstring::npos)
+        return RunCheckedSelfTest("tray-menu", [] { return RunLifecycleSelfTest(true, true); });
 
     InitCommonControls();
     LoadConfig();
