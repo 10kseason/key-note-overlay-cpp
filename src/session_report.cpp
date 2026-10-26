@@ -214,7 +214,7 @@ std::string RenderHtml(const Session& s) {
             << "–" << Number(note.endMs / 1000, 3) << "초" << (note.interrupted ? " · 설정 변경/종료로 홀드 닫힘" : "") << "</title></rect>";
     }
     out << "</svg></div></section><footer>Key Note Overlay · 리포트 v1 · 난이도 모델 v2.8";
-    if (s.lanes == 5) out << " / AERY 저레벨 보정 v2.12";
+    if (s.lanes == 5) out << " / AERY 저레벨 보정 v2.12 + 230개 보조 기준 v2.13";
     if (s.lanes == 10) out << " / 10K Revive 2026 기준 v2.12";
     out << " / LN 추가 부담 2/3. 곡명·게임 판정·놓친 노트·손 배치·클리어 여부는 알 수 없습니다. 다른 키 수의 수치를 직접 비교하지 마세요. 로컬 시각과 등록 레인의 타이밍이 포함되므로 공유 전 확인하세요. 외부 통신·스크립트·글꼴 다운로드가 없는 독립 HTML입니다.</footer></main></html>";
     return out.str();

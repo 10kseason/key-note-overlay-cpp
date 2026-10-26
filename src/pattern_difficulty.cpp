@@ -1,6 +1,7 @@
 #include "pattern_difficulty.h"
 #include "mania_strain.h"
 #include "calibration_tables.h"
+#include "aery_auxiliary_reference.h"
 
 #include <algorithm>
 #include <bitset>
@@ -198,12 +199,17 @@ Snapshot DifficultyEstimator::Evaluate(double nowMs, bool includeIdleMetrics) co
         result.stars = ManiaStars(ratedNotes, lanes_, std::max(0.0, nowMs - startedMs_ - WindowMs), holdWeight_);
         result.rating = result.stars;
         if (result.profile == RatingProfile::Aery5) {
-            const double calibrated = CalibratedRating(result.stars + AeryDensityWeight * std::log1p(result.nps), AeryCalibration, result.outsideCalibration);
+            const double logNps = std::log1p(result.nps);
+            const double composite = result.stars + AeryDensityWeight * logNps;
+            const double calibrated = CalibratedRating(composite, AeryCalibration, result.outsideCalibration);
             // Live feedback: chart levels 1-10 read about one level too high,
             // corresponding to original estimates 2-11. Preserve the fitted
             // table and taper the correction to zero at 13 without a jump.
             const double lowLevelCorrection = std::clamp((13.0 - calibrated) / 2.0, 0.0, 1.0);
-            result.rating = std::max(1.0, calibrated - lowLevelCorrection);
+            // The 230 training-only references provide a bounded residual.
+            // Keep the manual reduction tied to the original 34-point curve:
+            // the auxiliary estimate must not amplify or cancel that reduction.
+            result.rating = std::max(1.0, calibrated + AeryAuxiliaryDelta(composite, logNps) - lowLevelCorrection);
             result.ratingError = AeryError80;
         }
         if (result.profile == RatingProfile::Osu10) {

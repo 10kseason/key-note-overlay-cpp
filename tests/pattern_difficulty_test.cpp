@@ -1,6 +1,7 @@
 #include "pattern_difficulty.h"
 #include "mania_strain.h"
 #include "calibration_tables.h"
+#include "aery_auxiliary_reference.h"
 #include "dan_rating.h"
 #include "revive10_reference.h"
 
@@ -209,17 +210,29 @@ int main() {
     check("bms_outside_range_is_flagged", stream(8,1000,5,5).Evaluate(7999).outsideCalibration == -1 &&
         stream(400,20,1,5).Evaluate(7999).outsideCalibration == 1);
 
-    // Fixed tap fixtures, measured before the live-feedback adjustment. Assert
-    // numerical outcomes without deriving the expected value from the new rule.
+    // Fixed tap fixtures. Expected v2.13 values were calculated independently
+    // from the frozen v2.12 features and Python reference helper.
     auto steadyAery = [&](double interval) { return stream(160, interval, 5, 5).Evaluate(159 * interval + 10); };
     const auto aeryFloor = steadyAery(1000), aeryEasy = steadyAery(500), aeryLow = steadyAery(125);
     const auto aeryUpperLow = steadyAery(100), aeryTransition = steadyAery(85), aeryMid = steadyAery(75);
     const auto aeryHigh = steadyAery(60), aeryVeryHigh = steadyAery(40);
     check("aery_feedback_floor_is_one", aeryFloor.ready && near(aeryFloor.rating, 1.0) && aeryFloor.outsideCalibration == -1);
-    check("aery_level_two_becomes_one", aeryEasy.ready && near(aeryEasy.rating, 1.0));
-    check("aery_low_range_loses_one_level", near(aeryLow.rating, 7.6572160958342064) && near(aeryUpperLow.rating, 8.7170585540271333));
-    check("aery_feedback_transition_has_partial_reduction", near(aeryTransition.rating, 10.512328063873899) && near(aeryMid.rating, 11.5));
-    check("aery_high_range_is_unchanged", near(aeryHigh.rating, 13.46142560964438) && near(aeryVeryHigh.rating, 16.004500149207409));
+    check("aery_easy_keeps_manual_reduction_with_aux", aeryEasy.ready && near(aeryEasy.rating, 1.0376954717569444));
+    check("aery_low_range_uses_aux_and_original_reduction", near(aeryLow.rating, 7.5919525298511505) && near(aeryUpperLow.rating, 8.6093545867583146));
+    check("aery_transition_reduction_uses_unshifted_base", near(aeryTransition.rating, 10.415946655284724) && near(aeryMid.rating, 11.448820058451817));
+    check("aery_high_range_uses_only_small_aux_shift", near(aeryHigh.rating, 13.460455425251322) && near(aeryVeryHigh.rating, 16.008517294950938));
+    check("aery_keeps_34_curve_points_and_230_separate_anchors", pattern::AeryCalibration.size() == 34 && pattern::AeryAuxiliaryAnchors.size() == 230);
+    check("aery_aux_invalid_and_outside_queries_are_zero",
+        pattern::AeryAuxiliaryDelta(std::numeric_limits<double>::quiet_NaN(), 2) == 0 &&
+        pattern::AeryAuxiliaryDelta(5, std::numeric_limits<double>::infinity()) == 0 &&
+        pattern::AeryAuxiliaryDelta(5, -1) == 0 && pattern::AeryAuxiliaryDelta(0, 2) == 0 &&
+        pattern::AeryAuxiliaryDelta(100, 2) == 0);
+    bool boundedAux = true;
+    for (double x = 0; x < 12; x += 0.05) for (double logNps = 0; logNps < 8; logNps += 0.2) {
+        const double shift = pattern::AeryAuxiliaryDelta(x, logNps);
+        boundedAux = boundedAux && std::isfinite(shift) && std::abs(shift) <= 0.5;
+    }
+    check("aery_aux_is_finite_and_bounded_across_feature_grid", boundedAux);
     check("aery_feedback_preserves_strain_and_nps", near(aeryLow.stars, 1.5877456950552937) && near(aeryLow.nps, 8.0) &&
         aeryLow.currentNps == 8 && aeryLow.chordPercent == 0 && aeryLow.jackPercent == 0 && aeryLow.holdOverlapPercent == 0);
     pattern::PatternSummary aerySummary;

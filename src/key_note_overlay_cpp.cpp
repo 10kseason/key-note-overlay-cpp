@@ -1406,7 +1406,7 @@ std::wstring DifficultyDetails(bool multiline) {
             << L"홀드 중 추가 입력  " << s.holdOverlapPercent << L" %\n"
             << L"최근 8초 입력  " << s.samples << L"회     |     누르고 있는 키  " << s.heldKeys << L"개";
         if (s.retained) out << L"\n입력 연결 대기 · 마지막 추정 유지 (10초 무입력 시 결과 확정)";
-        else if (s.ready && s.ratingError > 0) out << L"\n기존 보정 오차  ±" << s.ratingError << L" 단계 · 저레벨·LN 조정 전 검증값";
+        else if (s.ready && s.ratingError > 0) out << L"\n기존 오차 ±" << s.ratingError << L" · 보조·저레벨·LN 조정 전 검증값";
         const auto dan = pattern::EstimateDan(s);
         if (s.ready && dan.available && !s.retained) {
             out << L"\n기준: " << pattern::DanBasis(s.profile) << L"  |  참고 ★" << std::setprecision(2) << s.stars;

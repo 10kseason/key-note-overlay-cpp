@@ -62,10 +62,11 @@ int main(int argc, char** argv) {
     const auto aerySession = aeryRecorder.Take("synthetic", 25910);
     const auto aeryHtml = report::RenderHtml(aerySession);
     check("aery_report_uses_corrected_peak_and_graph_value", aerySession.peak.snapshot.ready && aerySession.points.size() == 1 &&
-        std::abs(report::DifficultyValue(aerySession.peak.snapshot) - 8.7170585540271333) < 1e-10 &&
+        std::abs(report::DifficultyValue(aerySession.peak.snapshot) - 8.6093545867583146) < 1e-10 &&
         report::DifficultyValue(aerySession.points.front().snapshot) == report::DifficultyValue(aerySession.peak.snapshot) &&
-        aeryHtml.find("⑤8.7") != std::string::npos);
+        aeryHtml.find("⑤8.6") != std::string::npos);
     check("aery_report_identifies_feedback_model", aeryHtml.find("AERY 저레벨 보정 v2.12") != std::string::npos &&
+        aeryHtml.find("230개 보조 기준 v2.13") != std::string::npos &&
         html.find("AERY 저레벨 보정 v2.12") == std::string::npos);
     recorder.Begin(4, 0, "bounded");
     for (std::size_t i = 0; i < report::Recorder::MaxNotes + 3; ++i) {
