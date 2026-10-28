@@ -58,11 +58,13 @@ Sample Window::Snapshot(double nowMs, int analysisKeys) {
     const double left = std::max(started_, nowMs - WindowMs);
     sample.durationMs = started_ < 0 ? 0 : nowMs - left;
     for (const auto& press : presses_) {
-        // A slow release can be an ordinary tap. Without chart timing there is
-        // no reliable way to distinguish it from LN, including a held key.
-        if (press.start < left || press.start > nowMs) continue;
-        const double start = press.start - left;
-        sample.chart.notes.push_back({mapping[press.lane], start, start});
+        const double end = press.end < 0 ? nowMs : press.end;
+        // Classify before clipping: an already-qualified hold may have less
+        // than 170ms left inside the window. Open keys use only observed time.
+        const bool hold = end - press.start >= HoldThresholdMs;
+        if (press.start > nowMs || (hold ? end <= left : press.start < left)) continue;
+        const double start = std::max(press.start, left) - left;
+        sample.chart.notes.push_back({mapping[press.lane], start, hold ? end - left : start});
     }
     if (sample.chart.notes.empty()) sample.status = L"입력 대기";
     else if (sample.chart.notes.size() < 8 || sample.durationMs < 1500) sample.status = L"입력 수집 중";
@@ -105,10 +107,7 @@ void Meter::Update(double nowMs, bool enabled, int analysisKeys, bool pending, b
     jobGeneration_ = generation_;
     try {
         job_ = std::async(std::launch::async, [sample = std::move(sample), cancel = cancelled_] {
-            auto result = revive_aux::Analyze(sample.chart, cancel.get(), sample.durationMs, std::chrono::milliseconds(100));
-            // A zero from the tap-only model does not prove the chart has no LN.
-            result.holdKnown = false;
-            return result;
+            return revive_aux::Analyze(sample.chart, cancel.get(), sample.durationMs, std::chrono::milliseconds(100));
         });
         if (!summary_.ready) summary_.status = L"계산 중";
     } catch (const std::exception&) { summary_ = {}; summary_.status = L"계산 보류"; }

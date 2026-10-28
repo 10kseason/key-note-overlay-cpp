@@ -13,9 +13,8 @@ int main() {
     check("eight_second_taps", sample.status.empty() && sample.chart.notes.size() == 80 && sample.durationMs == 8000);
     bool taps = true; for (const auto& n : sample.chart.notes) taps &= n.startMs == n.endMs;
     check("short_presses_are_taps", taps);
-    // The same tap chart played with a slower release must not invent LN tails
-    // or change the five press-based axes. Keyboard duration is not chart data.
-    for(int keys : {4,7,10,18}) for(int heldMs : {90,95,120,200,500}) {
+    // Releases below the explicit live threshold keep the same tap-only axes.
+    for(int keys : {4,7,10,18}) for(double heldMs : {90.,95.,120.,150.,169.,169.999}) {
         revive_live::Window quick,slow;quick.Reset(keys);slow.Reset(keys);
         for(int i=0;i<16;++i) {
             quick.Key(i%keys,true,i*600);quick.Key(i%keys,false,i*600+30);
@@ -28,6 +27,15 @@ int main() {
         check("slow_tap_release_does_not_create_ln",noTails && slowTraits.skills[5]==0);
         check("slow_tap_release_preserves_press_traits",quickTraits.ready && slowTraits.ready && quickTraits.skills==slowTraits.skills);
     }
+    for(double heldMs : {169.999,170.,170.001,250.,500.}) {
+        revive_live::Window released,open;released.Reset(4);open.Reset(4);
+        released.Key(0,true,100);released.Key(0,false,100+heldMs);
+        open.Key(0,true,100);open.Key(0,true,200); // Repeat must not reset the duration.
+        const auto a=released.Snapshot(100+heldMs),b=open.Snapshot(100+heldMs);
+        const double tail=heldMs>=170?heldMs:0;
+        check("released_hold_170ms_boundary",a.chart.notes.size()==1 && a.chart.notes[0].startMs==0 && std::abs(a.chart.notes[0].endMs-tail)<1e-8);
+        check("open_hold_170ms_boundary",b.chart.notes.size()==1 && b.chart.notes[0].startMs==0 && std::abs(b.chart.notes[0].endMs-tail)<1e-8);
+    }
     const auto expected = revive_aux::Analyze(sample.chart, nullptr, sample.durationMs);
     check("all_six_reference_values_available", expected.ready);
     revive_live::Meter meter; meter.Reset(10);
@@ -39,8 +47,7 @@ int main() {
         std::this_thread::sleep_for(std::chrono::milliseconds(2)); meter.Update(8000, true, 10, false, false, false);
     }
     check("async_result_ready", meter.Current().ready);
-    check("live_hold_is_unknown_not_a_zero_or_detection",!meter.Current().holdKnown && revive_aux::SkillValue(meter.Current(),5)==L"—" &&
-        revive_aux::Details(meter.Current()).find(L"홀드 미확인")!=std::wstring::npos);
+    check("short_live_taps_publish_zero_hold",meter.Current().holdKnown && revive_aux::SkillValue(meter.Current(),5)==L"0");
     for (int i = 0; i < 6; ++i) check("async_matches_snapshot", std::abs(expected.skills[i] - meter.Current().skills[i]) < 1e-8);
     std::cout << "80-press window completed in " << std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - started).count() << " ms (includes polling)\n";
@@ -67,12 +74,20 @@ int main() {
     window.Reset(10); window.Key(0, true, 0); window.Key(0, true, 10); window.Key(0, false, 89);
     window.Key(1, true, 100); window.Key(1, false, 190); window.Key(2, true, 200);
     auto holds = window.Snapshot(8200);
-    check("held_key_keeps_only_original_press", holds.chart.notes.size() == 1 && holds.chart.notes[0].startMs == 0 && holds.chart.notes[0].endMs == 0);
+    check("held_key_contributes_observed_duration", holds.chart.notes.size() == 1 && holds.chart.notes[0].startMs == 0 && holds.chart.notes[0].endMs == 8000);
     window.ReleaseAll(8300);
     holds = window.Snapshot(8400);
-    check("focus_loss_does_not_invent_tail_in_new_window", holds.chart.notes.empty());
+    check("focus_loss_closes_hold_at_release_time", holds.chart.notes.size()==1 && holds.chart.notes[0].startMs==0 && holds.chart.notes[0].endMs==7900);
     window.Key(2,true,8500);window.Key(2,false,8510);
-    check("focus_loss_allows_fresh_press",window.Snapshot(8600).chart.notes.size()==1);
+    check("focus_loss_allows_fresh_press",window.Snapshot(8600).chart.notes.size()==2);
+    check("released_hold_expires_at_window_boundary",window.Snapshot(16300).chart.notes.size()==1);
+    check("all_input_expires",window.Snapshot(16501).chart.notes.empty());
+    window.Reset(4);window.Key(0,true,0);window.Key(0,false,170);
+    const auto clipped=window.Snapshot(8169);
+    check("qualified_hold_keeps_one_ms_visible_tail",clipped.chart.notes.size()==1 && clipped.chart.notes[0].startMs==0 && clipped.chart.notes[0].endMs==1);
+    check("expired_hold_is_not_a_phantom_tap",window.Snapshot(8170).chart.notes.empty());
+    window.Reset(4);window.Key(0,true,0);window.Key(0,false,169);
+    check("short_press_before_window_is_not_ln",window.Snapshot(8001).chart.notes.empty());
     window.Reset(10); window.Key(0, true, 0); window.Key(0, true, 20); window.Key(0, false, 89);
     window.Key(1, true, 100); window.Key(1, false, 190);
     holds = window.Snapshot(200);
@@ -104,8 +119,8 @@ int main() {
     check("sparse_four_key_mapping_matches",subsetSample.status.empty() && subsetSample.chart.keys==4 && subsetExpected.ready && subsetExpected.skills==fourExpected.skills);
     meter.Update(8000,true,4,false,false,false);
     for(int retry=0;retry<200 && meter.Busy();++retry) {std::this_thread::sleep_for(std::chrono::milliseconds(2));meter.Update(8000,true,4,false,false,false);}
-    check("live_four_key_press_axes_match_hold_unknown",meter.Current().ready && meter.Current().skills==fourExpected.skills &&
-        meter.Current().skills[5]==0 && !meter.Current().holdKnown);
+    check("live_four_key_short_taps_have_zero_hold",meter.Current().ready && meter.Current().skills==fourExpected.skills &&
+        meter.Current().skills[5]==0 && meter.Current().holdKnown);
     // An old 4K result may finish after a mode change. It must never label 10K.
     meter.Update(8500,true,4,false,false,false);
     meter.Update(8500,true,10,false,false,false);
@@ -135,8 +150,28 @@ int main() {
         check("all_key_counts_remap_sparse_physical_lanes",remapped.status.empty() && remappedResult.ready && remappedResult.skills==reference.skills);
         meter.Update(8000,true,keys,false,false,false);
         for(int retry=0;retry<200 && meter.Busy();++retry) {std::this_thread::sleep_for(std::chrono::milliseconds(2));meter.Update(8000,true,keys,false,false,false);}
-        check("all_key_counts_publish_press_traits_hold_unknown",meter.Current().ready && meter.Current().skills==reference.skills &&
-            !meter.Current().holdKnown && !revive_aux::SkillAvailable(meter.Current(),5));
+        check("all_key_counts_publish_six_traits_for_taps",meter.Current().ready && meter.Current().skills==reference.skills &&
+            meter.Current().holdKnown && revive_aux::SkillAvailable(meter.Current(),5));
+        window.Reset(keys);meter.Reset(keys);subsetWindow.Reset(18);
+        chartcalc::Chart expectedHolds;expectedHolds.keys=keys;
+        for(int i=0;i<20;++i) {
+            const int lane=i%keys;
+            expectedHolds.notes.push_back({lane,i*400.,i*400.+170});
+            window.Key(lane,true,i*400);window.Key(lane,false,i*400+170);
+            meter.Key(lane,true,i*400);meter.Key(lane,false,i*400+170);
+            subsetWindow.Key(18-keys+lane,true,i*400);subsetWindow.Key(18-keys+lane,false,i*400+170);
+        }
+        const auto holdReference=revive_aux::Analyze(expectedHolds,nullptr,8000);
+        const auto holdSample=window.Snapshot(8000);
+        const auto holdActual=revive_aux::Analyze(holdSample.chart,nullptr,holdSample.durationMs);
+        check("all_key_counts_170ms_holds_match_explicit_ln",holdReference.ready && holdReference.skills[5]>0 && holdActual.skills==holdReference.skills);
+        const auto mappedHolds=subsetWindow.Snapshot(8000,keys);
+        check("qualified_holds_keep_sparse_lane_mapping",mappedHolds.status.empty() &&
+            revive_aux::Analyze(mappedHolds.chart,nullptr,mappedHolds.durationMs).skills==holdReference.skills);
+        meter.Update(8000,true,keys,false,false,false);
+        for(int retry=0;retry<200 && meter.Busy();++retry) {std::this_thread::sleep_for(std::chrono::milliseconds(2));meter.Update(8000,true,keys,false,false,false);}
+        check("all_key_counts_publish_nonzero_hold",meter.Current().ready && meter.Current().skills==holdReference.skills &&
+            revive_aux::SkillAvailable(meter.Current(),5) && revive_aux::SkillValue(meter.Current(),5)!=L"0");
     }
     chartcalc::Chart dense; dense.keys = 10;
     for (int i=0;i<640;++i) dense.notes.push_back({i%10,i*12.5,std::min(8000.0,i*12.5+100)});

@@ -2,9 +2,9 @@
 
 Windows rhythm-game key overlay for OBS, osu!, and Qwilight. It captures configured keyboard lanes with a low-level Win32 keyboard hook and renders notes in a straight lane layout. Unregistered keys are ignored before rendering.
 
-**v2.15 — 1~18K 보조지표·큰 글씨·홀드 오인식 수정:** 오버레이 크기 10% 축소/확대, 레인 간격 조절, 큰 측정 레벨·보조지표·4K LN 표시를 제공합니다. 6개 스킬 칸을 모두 보여주며 실시간은 5개 누름 특징을 갱신하고, 타건만으로 확인할 수 없는 홀드는 `—`로 표시합니다. osu! 선택 채보의 홀드는 파일의 실제 LN으로 계산합니다. [변경·검증 내역](docs/release-v2.15.md)
+**v2.16 — 실시간 홀드(LN) 170ms 판정:** 170ms 이상 누른 입력을 홀드(LN)로 추정하고, 170ms 미만은 단타로 처리합니다. 누르고 있는 중에도 다음 계산에 반영하며 해당 입력이 없으면 홀드 0입니다. 일반판·NoOsuMemory 모두 1~18K의 6개 스킬을 표시합니다. osu! 선택 채보는 파일의 실제 LN으로 계산합니다. [변경·검증 내역](docs/release-v2.16.md)
 
-[일반판 ZIP](https://github.com/10kseason/key-note-overlay-cpp/releases/download/v2.15/KeyNoteOverlayCpp-v2.15-Windows-x64.zip) · [NoOsuMemory ZIP](https://github.com/10kseason/key-note-overlay-cpp/releases/download/v2.15/KeyNoteOverlayCpp-v2.15-NoOsuMemory-Windows-x64.zip)
+[일반판 ZIP](https://github.com/10kseason/key-note-overlay-cpp/releases/download/v2.16/KeyNoteOverlayCpp-v2.16-Windows-x64.zip) · [NoOsuMemory ZIP](https://github.com/10kseason/key-note-overlay-cpp/releases/download/v2.16/KeyNoteOverlayCpp-v2.16-NoOsuMemory-Windows-x64.zip)
 
 일반판의 osu! 선곡 연동은 매 실행 OFF이며 직접 동의해야 켜집니다. NoOsuMemory는 게임 메모리 리더와 연동 UI를 컴파일에서 제외합니다. 4~10K 프리셋 외 1~3K·11~18K는 키를 직접 등록하고 `등록 키 수 (기존)`을 사용하세요. 원본 4K LN Dan Courses v2 1~15단의 보조 비교는 일반 Reform과 구분합니다. [스킬 범위](docs/revive-cpp-auxiliary.md) · [4K LN 기준](docs/ln4-reference.md)
 
@@ -52,7 +52,7 @@ Download the portable Windows x64 ZIP from [Releases](https://github.com/10kseas
 
 ## Build
 
-별도 파일 분석 앱 **ChartDifficultyCalculator**의 소스도 저장소에 있습니다. v2.15 배포 자산은 오버레이 일반판과 NoOsuMemory만 제공합니다. `.osu` 또는 지원되는 BMS를 직접 골라 구간 그래프와 난이도 요약을 확인하며 게임 메모리를 읽지 않습니다. [계산기 소스·지원 범위·빌드 안내](https://github.com/10kseason/key-note-overlay-cpp/tree/main/difficulty-calculator)를 참고하세요.
+별도 파일 분석 앱 **ChartDifficultyCalculator**의 소스도 저장소에 있습니다. v2.16 배포 자산은 오버레이 일반판과 NoOsuMemory만 제공합니다. `.osu` 또는 지원되는 BMS를 직접 골라 구간 그래프와 난이도 요약을 확인하며 게임 메모리를 읽지 않습니다. [계산기 소스·지원 범위·빌드 안내](https://github.com/10kseason/key-note-overlay-cpp/tree/main/difficulty-calculator)를 참고하세요.
 
 Requirements:
 
@@ -166,7 +166,7 @@ v2.12는 **에리팩 실제 ⑤1~10에서 약 +1로 표시된다**는 피드백�
 
 v2.12는 코스 화면과 원본 해시를 대조한 **64개 채보로 Revive 16코스**의 기준점을 계산했습니다. strain에 키 조합 변화·리듬 간격 변화·반복 부담을 더하는 기존 특징식은 유지했습니다. 현재·완료 결과·새 리포트에 같은 기준을 사용하며, 실행할 때 채보 폴더는 필요하지 않습니다. 16단계가 각각 구분되지만 실제 연주 정확도나 단위 합격을 검증한 결과는 아닙니다. [기준표·계산·한계](docs/revive10-reference.md)
 
-**분석 키 수 선택:** 난이도 탭에서 `등록 키 수 (기존)` / `자동 추정 · 세션 고정` / `4K~10K 수동 고정`을 선택하고 적용할 수 있습니다. 등록 배치는 유지하며, 사용 키가 확정되면 미사용 레인을 접고 창 폭만 줄입니다. 각 레인·노트의 크기는 유지합니다. 자동은 최소 8초·32회 입력, 관측 키마다 2회 이상, 새 키 없이 3초가 지난 뒤 관측 키 수를 고정합니다. 일부 키를 잠깐 안 쳐도 줄이지 않으며, 고정 수보다 많은 키가 들어오면 `키 수 확인`으로 보류합니다. 10초 무입력 뒤 새 연주 또는 분석 초기화로 다시 추정합니다. 게임의 실제 키 모드를 확정하는 기능은 아니므로 확실한 경우 수동 고정을 사용하세요. 6K·9K는 기존 입력 지수입니다. Revive CPP는 1~18K에 적용합니다. 실시간은 5개 누름 특징과 홀드 미확인(`—`), 원본 선택 채보는 실제 롱노트를 포함한 6개 특징을 표시합니다. 1~3K·11~18K는 직접 키를 등록하고 `등록 키 수 (기존)`을 선택하세요. 큰 배치의 일부 키를 수동/자동 4~10K로 쓰면 해당 수의 레인이 확인된 뒤 등록 순서로 대응하며 추가 레인 입력 시 보류합니다. [상세 동작](docs/analysis-key-mode.md)
+**분석 키 수 선택:** 난이도 탭에서 `등록 키 수 (기존)` / `자동 추정 · 세션 고정` / `4K~10K 수동 고정`을 선택하고 적용할 수 있습니다. 등록 배치는 유지하며, 사용 키가 확정되면 미사용 레인을 접고 창 폭만 줄입니다. 각 레인·노트의 크기는 유지합니다. 자동은 최소 8초·32회 입력, 관측 키마다 2회 이상, 새 키 없이 3초가 지난 뒤 관측 키 수를 고정합니다. 일부 키를 잠깐 안 쳐도 줄이지 않으며, 고정 수보다 많은 키가 들어오면 `키 수 확인`으로 보류합니다. 10초 무입력 뒤 새 연주 또는 분석 초기화로 다시 추정합니다. 게임의 실제 키 모드를 확정하는 기능은 아니므로 확실한 경우 수동 고정을 사용하세요. 6K·9K는 기존 입력 지수입니다. Revive CPP는 1~18K에 적용합니다. 실시간은 170ms 이상 누른 입력을 홀드(LN)로 추정해 6개 특징을 표시하고, 원본 선택 채보는 파일의 실제 롱노트를 사용합니다. 1~3K·11~18K는 직접 키를 등록하고 `등록 키 수 (기존)`을 선택하세요. 큰 배치의 일부 키를 수동/자동 4~10K로 쓰면 해당 수의 레인이 확인된 뒤 등록 순서로 대응하며 추가 레인 입력 시 보류합니다. [상세 동작](docs/analysis-key-mode.md)
 
 단위의 높낮이는 **7단 low → 7단 mid low → 7단 수준 → 7단 high**처럼 표시합니다. 현재 분석과 지난 결과에 같은 표현을 쓰며, 비교 기준과 원래 strain ★ 값은 세부 지표에 남깁니다. 입력 부담이 비슷해 분리되지 않는 인접 단계는 `8~9단`처럼 범위로 표시합니다. 기준 최저 미만/최고 초과에는 `↓/↑`를 붙이고 높낮이를 세분하지 않습니다.
 

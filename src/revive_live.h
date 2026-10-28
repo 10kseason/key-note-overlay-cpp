@@ -8,6 +8,7 @@
 namespace revive_live {
 constexpr double WindowMs = 8000;
 constexpr double RefreshMs = 500;
+constexpr double HoldThresholdMs = 170;
 constexpr std::size_t MaxPresses = 4096;
 
 struct Sample {
@@ -16,8 +17,8 @@ struct Sample {
     std::wstring status;
 };
 
-// UI-thread input history. Only press times become note heads. Release timing
-// is tracked for input/session state, never used to invent chart LN tails.
+// UI-thread input history. Presses held at least HoldThresholdMs become LN
+// estimates; this describes physical input, not the selected chart's notes.
 class Window {
 public:
     void Reset(int lanes);

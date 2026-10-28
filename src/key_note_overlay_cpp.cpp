@@ -4163,8 +4163,8 @@ int RunUiSelfTest(bool blockFirstReport = false) {
     const auto fourView=gOsuView;gOsuView={};ApplyOsuLinkView(fourView);
     check("four_key_selected_skill_settings",WindowText(GetDlgItem(gSettingsWnd,IDC_OSU_SKILLS))==revive_aux::Details(fourView.revive));
     check("four_key_live_and_file_cpp_values_render",gReviveLive.Current().ready && gOsuView.revive.ready &&
-        gReviveLive.Current().skills[3]>0 && !gReviveLive.Current().holdKnown &&
-        revive_aux::SkillValue(gReviveLive.Current(),5)==L"—" && gOsuView.revive.holdKnown && gOsuView.revive.skills[5]>0);
+        gReviveLive.Current().skills[3]>0 && gReviveLive.Current().holdKnown &&
+        revive_aux::SkillValue(gReviveLive.Current(),5)==L"0" && gOsuView.revive.holdKnown && gOsuView.revive.skills[5]>0);
     check("ln4_live_and_selected_rows_render",CurrentHudLayout(240).liveLnHeight==60 && CurrentHudLayout(240).selectedLnHeight==60 &&
         renderHud(240,90,L"hud-ln4-compact.bmp") && renderHud(900,220,L"hud-ln4-wide.bmp"));
     gDifficultySnapshot=beforeLnPreview;gAnalysisKeys=beforeLnKeys;
@@ -4581,7 +4581,16 @@ int RunUiSelfTest(bool blockFirstReport = false) {
         RefreshDifficultyDisplay(268000);
         for(int retry=0;retry<200 && gReviveLive.Busy();++retry) {Sleep(2);RefreshDifficultyDisplay(268000);}
         check("registered_1_to_18_keys_reach_live_auxiliary",gReviveLive.Current().ready && gDifficultySnapshot.analysisKeys==keys &&
-            !gReviveLive.Current().holdKnown && revive_aux::SkillValue(gReviveLive.Current(),5)==L"—");
+            gReviveLive.Current().holdKnown && revive_aux::SkillValue(gReviveLive.Current(),5)==L"0");
+        ResetDifficulty(keys);
+        for(int i=0;i<20;++i) {
+            RecordDifficultyInput(i%keys,true,270000+i*400.);
+            RecordDifficultyInput(i%keys,false,270170+i*400.);
+        }
+        RefreshDifficultyDisplay(278000);
+        for(int retry=0;retry<200 && gReviveLive.Busy();++retry) {Sleep(2);RefreshDifficultyDisplay(278000);}
+        check("registered_1_to_18_keys_publish_170ms_hold",gReviveLive.Current().ready &&
+            gReviveLive.Current().skills[5]>0 && revive_aux::SkillAvailable(gReviveLive.Current(),5));
         if(keys==5 || keys==7 || keys==9 || keys==18) {
             const auto name=L"hud-"+std::to_wstring(keys)+L"k-compact.bmp";
             check("other_keys_six_large_skills_render",renderHud(240,90,name.c_str()));

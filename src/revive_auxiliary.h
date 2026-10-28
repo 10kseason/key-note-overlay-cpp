@@ -12,8 +12,8 @@ struct Summary {
     // STREAM, SPEED, JACK, CHORD, TECH, HOLD: model-normalized chart traits.
     std::array<double, 6> skills{};
     std::wstring status;
-    // File notes identify LN; physical key durations alone cannot. Unknown
-    // HOLD remains visible as an unavailable axis rather than a fabricated 0.
+    // Availability under the caller's model: file LN tails or the explicit
+    // live hold-duration rule. Unavailable HOLD is shown as a dash.
     bool holdKnown = true;
 };
 // Pure 1K-18K calculation. observationMs < 0 uses the whole chart's duration;
