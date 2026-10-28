@@ -526,9 +526,24 @@ int main() {
     for (int i = 0; i < 20; ++i) { selector.Key(0, true, 8100 + i*125.); selector.Key(0, false, 8110 + i*125.); }
     check("auto_keys_never_shrink_in_session", selector.Keys() == 4);
     selector.Key(9, true, 11000); selector.Key(9, false, 11010);
-    check("auto_late_extra_key_is_conflict", selector.Conflict() && selector.Keys() == 4);
+    check("auto_late_extra_key_rechecks_without_permanent_conflict", selector.Pending() && !selector.Conflict() && selector.Keys() == 4);
     check("folding_reverts_on_extra_key", !overlay::MakeLaneDisplay(10,900,100,selector,true).compact);
-    selector.Key(0, true, 21010);
+    auto lateKeyCorrection=selector;
+    lateKeyCorrection.Key(9,true,12000);lateKeyCorrection.Key(9,false,12010);lateKeyCorrection.Update(14000);
+    check("auto_recovers_after_late_key_is_confirmed",!lateKeyCorrection.Pending() && !lateKeyCorrection.Conflict() && lateKeyCorrection.Keys()==5);
+    lateKeyCorrection.Key(1,true,14100);lateKeyCorrection.Key(1,false,14110);
+    lateKeyCorrection.Key(3,true,14200);lateKeyCorrection.Key(3,false,14210);
+    lateKeyCorrection.Update(17200);
+    check("auto_correction_waits_for_each_new_lane_twice",lateKeyCorrection.Pending() && lateKeyCorrection.Keys()==5);
+    lateKeyCorrection.Key(1,true,17300);lateKeyCorrection.Key(1,false,17310);
+    lateKeyCorrection.Key(3,true,17400);lateKeyCorrection.Key(3,false,17410);
+    check("auto_can_correct_again_to_seven_keys",!lateKeyCorrection.Pending() && lateKeyCorrection.Keys()==7);
+    selector.Reset(18,-1);
+    for(int i=0;i<66;++i) {selector.Key(i%11,true,i*125.);selector.Key(i%11,false,i*125.+10);}
+    selector.Update(9000);
+    check("auto_more_than_ten_keys_remains_explicitly_unsupported",selector.Pending() && selector.Conflict());
+    selector=lateKeyCorrection;
+    selector.Key(0, true, 27410);
     check("auto_new_session_relearns_after_ten_seconds", selector.Pending() && !selector.Conflict() && selector.Observed() == 1);
     check("new_session_unfolds_while_observing", overlay::MakeLaneDisplay(10,900,100,selector,true).visible==10);
     selector.Key(0, true, 31010); selector.Update(31010);

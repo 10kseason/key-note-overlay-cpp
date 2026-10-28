@@ -18,6 +18,13 @@ struct Sample {
     std::wstring status;
 };
 
+// Captured when the immutable input window is queued, never when its result
+// arrives. ready excludes retained/unqualified primary ratings.
+struct RatingContext {
+    bool ready = false;
+    double strength = 0;
+};
+
 // UI-thread input history. Presses held at least HoldThresholdMs become LN
 // estimates; this describes physical input, not the selected chart's notes.
 class Window {
@@ -47,14 +54,18 @@ public:
     void Reset(int lanes);
     void Key(int lane, bool down, double nowMs);
     void ReleaseAll(double nowMs) { window_.ReleaseAll(nowMs); }
-    void Update(double nowMs, bool enabled, int analysisKeys, bool pending, bool conflict, bool limited);
+    void SetAnalysisKeys(int keys);
+    void Update(double nowMs, bool enabled, int analysisKeys, bool pending, bool conflict, bool limited,
+        RatingContext rating = {});
     const revive_aux::Summary& Current() const { return summary_; }
+    const RatingContext& CurrentRating() const { return rating_; }
     bool Busy() const { return job_.valid(); }
     void Stop();
 private:
     void Invalidate(const std::wstring& status);
     Window window_;
     revive_aux::Summary summary_;
+    RatingContext rating_, jobRating_;
     std::future<revive_aux::Summary> job_;
     std::shared_ptr<std::atomic<bool>> cancelled_;
     std::uint64_t generation_ = 0, jobGeneration_ = 0;
@@ -68,7 +79,8 @@ private:
 // and an input limit or key conflict withholds the whole session.
 class CompletedSkills {
 public:
-    void Observe(const revive_aux::Summary& live, bool idle, bool counted, bool blocked, double strength);
+    void Observe(const revive_aux::Summary& live, const RatingContext& sourceRating,
+        bool idle, bool counted, bool blocked);
     void Reset() { peak_ = completed_ = {}; best_ = 0; blocked_ = counted_ = false; }
     const revive_aux::Summary& Completed() const { return completed_; }
 private:

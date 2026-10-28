@@ -4,7 +4,7 @@
 #include <cmath>
 
 namespace pattern {
-// 0 preserves the registered layout, -1 infers once per session, 4..10 fixes
+// 0 preserves the registered layout, -1 infers and corrects upward, 4..10 fixes
 // the analysis basis. Physical input/visual lanes are never changed here.
 inline int NormalizeAnalysisKeyMode(int mode) {
     return mode == -1 || (mode >= 4 && mode <= 10) ? mode : 0;
@@ -40,17 +40,18 @@ public:
         held_.fill(false); heldCount_ = 0;
     }
     void Update(double nowMs) {
-        if (mode_ != -1 || locked_ || first_ < 0 || !std::isfinite(nowMs) || nowMs < last_) return;
+        if (mode_ != -1 || (locked_ && observed_ <= locked_) || first_ < 0 || !std::isfinite(nowMs) || nowMs < last_) return;
         if (observed_ < 4 || observed_ > 10 || presses_ < 32 || nowMs - first_ < 8000 || nowMs - lastNew_ < 3000) return;
         for (int count : counts_) if (count == 1) return;
         locked_ = observed_;
     }
     int Keys() const { return mode_ == -1 ? (locked_ ? locked_ : registered_) : mode_ > 0 ? mode_ : registered_; }
     int Observed() const { return observed_; }
-    bool Pending() const { return mode_ == -1 && !locked_; }
-    // A late extra lane invalidates the fixed inference; do not silently ignore
-    // that key or switch comparison scales in the middle of a reported session.
-    bool Conflict() const { return mode_ != 0 && (observed_ > (Pending() ? 10 : Keys())); }
+    bool Rechecking() const { return mode_ == -1 && locked_ && observed_ > locked_; }
+    bool Pending() const { return mode_ == -1 && (!locked_ || Rechecking()); }
+    // Automatic inference can recover after later lanes are observed twice and
+    // settle for three seconds. Manual limits and unsupported >10K stay blocked.
+    bool Conflict() const { return mode_ == -1 ? observed_ > 10 : mode_ > 0 && observed_ > mode_; }
     bool ObservedLane(int lane) const { return lane >= 0 && lane < registered_ && counts_[lane] > 0; }
     bool CompactReady() const {
         if (mode_ == 0 || Pending() || Conflict() || observed_ != Keys()) return false;

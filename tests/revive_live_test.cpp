@@ -41,12 +41,13 @@ int main() {
     revive_live::Meter meter; meter.Reset(10);
     for (int i = 0; i < 80; ++i) { meter.Key(i % 10, true, i * 100); meter.Key(i % 10, false, i * 100 + 30); }
     const auto started = std::chrono::steady_clock::now();
-    meter.Update(8000, true, 10, false, false, false);
+    meter.Update(8000, true, 10, false, false, false, {true, 7});
     check("async_snapshot_queued", meter.Busy());
     for (int retry = 0; retry < 200 && meter.Busy(); ++retry) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(2)); meter.Update(8000, true, 10, false, false, false);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2)); meter.Update(8000, true, 10, false, false, false, {true, 99});
     }
     check("async_result_ready", meter.Current().ready);
+    check("async_rating_belongs_to_queued_window",meter.CurrentRating().ready && meter.CurrentRating().strength==7);
     check("short_live_taps_publish_zero_hold",meter.Current().holdKnown && revive_aux::SkillValue(meter.Current(),5)==L"0");
     for (int i = 0; i < 6; ++i) check("async_matches_snapshot", std::abs(expected.skills[i] - meter.Current().skills[i]) < 1e-8);
     std::cout << "80-press window completed in " << std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -59,10 +60,12 @@ int main() {
     meter.Key(0, true, 20000); meter.Key(0, false, 20030);
     meter.Update(20100, true, 10, false, false, false);
     check("new_session_rejects_inflight_old_result", !meter.Current().ready);
+    check("new_session_clears_old_rating_context", !meter.CurrentRating().ready);
     meter.Update(8500, true, 10, false, false, false);
     meter.Reset(10);
     meter.Update(8500, false, 10, false, false, false);
     check("reset_and_disable_clear_old_values", !meter.Current().ready && meter.Current().status == L"OFF");
+    check("reset_clears_rating_context", !meter.CurrentRating().ready);
     meter.Update(18000, true, 10, false, false, false);
     check("old_generation_discarded", !meter.Current().ready);
     meter.Update(18000, true, 4, false, false, false);
@@ -187,25 +190,36 @@ int main() {
     }
     revive_aux::Summary weak, strong; weak.ready = strong.ready = true; weak.skills[0] = 10; strong.skills[0] = 80;
     revive_live::CompletedSkills completed;
-    completed.Observe(strong, false, true, false, 9); completed.Observe(weak, false, true, false, 3);
-    completed.Observe(revive_aux::Summary{}, false, true, false, 12); // axes not ready at the rating peak
+    completed.Observe(strong, {true,9}, false, true, false); completed.Observe(weak, {true,3}, false, true, false);
+    completed.Observe(revive_aux::Summary{}, {}, false, true, false); // axes not ready at the rating peak
     check("completed_axes_wait_for_idle", !completed.Completed().ready);
-    completed.Observe(revive_aux::Summary{}, true, false, false, 0);
+    completed.Observe(revive_aux::Summary{}, {}, true, false, false);
     check("completed_axes_keep_strongest_stretch", completed.Completed().ready && completed.Completed().skills[0] == 80);
-    completed.Observe(weak, false, true, true, 20); completed.Observe(revive_aux::Summary{}, true, false, false, 0);
+    completed.Observe(weak, {true,20}, false, true, true); completed.Observe(revive_aux::Summary{}, {}, true, false, false);
     check("blocked_session_keeps_previous_axes", completed.Completed().skills[0] == 80);
-    completed.Observe(weak, false, true, false, 1); completed.Observe(revive_aux::Summary{}, true, false, false, 0);
+    completed.Observe(weak, {true,1}, false, true, false); completed.Observe(revive_aux::Summary{}, {}, true, false, false);
     check("next_session_replaces_axes", completed.Completed().skills[0] == 10);
-    completed.Observe(strong, false, false, false, 9);
-    completed.Observe(revive_aux::Summary{}, true, false, false, 0);
+    completed.Observe(strong, {true,9}, false, false, false);
+    completed.Observe(revive_aux::Summary{}, {}, true, false, false);
     check("unqualified_input_keeps_previous_axes", completed.Completed().skills[0] == 10);
-    completed.Observe(revive_aux::Summary{}, false, true, false, 12);
-    completed.Observe(strong, false, false, false, 12); // async axes arrive during a retained rating
-    completed.Observe(revive_aux::Summary{}, true, false, false, 0);
+    completed.Observe(revive_aux::Summary{}, {}, false, true, false);
+    completed.Observe(strong, {true,12}, false, false, false); // async axes arrive during a retained rating
+    completed.Observe(revive_aux::Summary{}, {}, true, false, false);
     check("late_axes_still_belong_to_qualified_session", completed.Completed().skills[0] == 80);
-    completed.Observe(revive_aux::Summary{}, false, true, false, 12);
-    completed.Observe(revive_aux::Summary{}, true, false, false, 0);
+    completed.Observe(revive_aux::Summary{}, {}, false, true, false);
+    completed.Observe(revive_aux::Summary{}, {}, true, false, false);
     check("missing_new_axes_do_not_relabel_previous_session", !completed.Completed().ready);
+    completed.Observe(weak, {true,3}, false, true, false);
+    // Repeated reads during newer primary peaks retain the original strength.
+    completed.Observe(weak, {true,3}, false, true, false);
+    completed.Observe(strong, {true,12}, false, false, false);
+    completed.Observe(weak, {true,4}, false, true, false);
+    completed.Observe(revive_aux::Summary{}, {}, true, false, false);
+    check("delayed_stronger_axes_replace_early_result",completed.Completed().skills[0]==80);
+    completed.Observe(weak, {true,3}, false, true, false);
+    completed.Observe(strong, {false,100}, false, false, false);
+    completed.Observe(revive_aux::Summary{}, {}, true, false, false);
+    check("retained_source_window_cannot_replace_peak",completed.Completed().skills[0]==10);
     completed.Reset();
     check("completed_axes_reset", !completed.Completed().ready);
     meter.Stop();
