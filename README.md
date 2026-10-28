@@ -52,7 +52,7 @@ Download the portable Windows x64 ZIP from [Releases](https://github.com/10kseas
 
 ## Build
 
-별도 파일 분석 앱 **ChartDifficultyCalculator**도 같은 릴리즈의 ZIP으로 제공합니다. `.osu` 또는 지원되는 BMS를 직접 골라 구간 그래프와 난이도 요약을 확인하며 게임 메모리를 읽지 않습니다. [계산기 소스·지원 범위·빌드 안내](https://github.com/10kseason/key-note-overlay-cpp/tree/main/difficulty-calculator)를 참고하세요.
+별도 파일 분석 앱 **ChartDifficultyCalculator**의 소스도 저장소에 있습니다. v2.15 배포 자산은 오버레이 일반판과 NoOsuMemory만 제공합니다. `.osu` 또는 지원되는 BMS를 직접 골라 구간 그래프와 난이도 요약을 확인하며 게임 메모리를 읽지 않습니다. [계산기 소스·지원 범위·빌드 안내](https://github.com/10kseason/key-note-overlay-cpp/tree/main/difficulty-calculator)를 참고하세요.
 
 Requirements:
 
