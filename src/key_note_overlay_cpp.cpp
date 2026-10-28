@@ -60,6 +60,8 @@ constexpr UINT ID_TRAY_EXIT = 40002;
 constexpr UINT ID_TRAY_MOVE = 40003;
 constexpr UINT TRAY_ICON_ID = 1;
 constexpr COLORREF kTransparentKey = RGB(1, 2, 3);
+constexpr int kMinOverlayWidth = 650;
+constexpr int kMinOverlayHeight = 300;
 
 constexpr int IDC_LANES = 1001;
 constexpr int IDC_X = 1002;
@@ -162,7 +164,7 @@ struct Config {
     int x = 80;
     int y = 40;
     int width = 900;
-    int height = 220;
+    int height = kMinOverlayHeight;
     int durationMs = 850;
     int travelPx = 180;
     int noteWidth = 58;
@@ -271,6 +273,7 @@ pattern::Snapshot gDifficultySnapshot;
 pattern::PatternSummary gPatternSummary;
 pattern::LiveContinuity gLiveContinuity;
 revive_live::Meter gReviveLive;
+revive_live::CompletedSkills gCompletedSkills;
 report::Recorder gReportRecorder;
 std::deque<report::Session> gPendingReports;
 std::future<report::SaveResult> gReportWrite;
@@ -443,8 +446,15 @@ void ResetDifficulty(int lanes) {
     gDifficulty.Reset(lanes);
     gAnalysisKeys.Reset(lanes, gConfig.analysisKeyMode);
     gPatternSummary.Reset();
+    gCompletedSkills.Reset();
     gLiveContinuity.Reset();
     gReviveLive.Reset(lanes);
+}
+
+void ObservePatternSummary(const pattern::Snapshot& s) {
+    gPatternSummary.Observe(s);
+    gCompletedSkills.Observe(gReviveLive.Current(), s.idle, s.ready && !s.retained, s.limited || s.keyModeConflict,
+        s.profile == pattern::RatingProfile::Generic ? s.score : s.rating);
 }
 
 pattern::Snapshot EvaluateLiveDifficulty(double nowMs) {
@@ -458,9 +468,12 @@ pattern::Snapshot EvaluateLiveDifficulty(double nowMs) {
 }
 
 overlay::LaneDisplay CurrentLaneDisplay(int fullWidth) {
-    return overlay::MakeLaneDisplay(static_cast<int>(gConfig.lanes.size()), fullWidth,
+    auto display = overlay::MakeLaneDisplay(static_cast<int>(gConfig.lanes.size()), fullWidth,
         gConfig.laneSpacingPercent, gAnalysisKeys,
         gConfig.difficultyEnabled && gConfig.analysisKeyMode != 0 && gCaptureMode == CaptureMode::None);
+    // Folding preserves note geometry but must not bypass the window minimum.
+    display.width = std::max(kMinOverlayWidth, display.width);
+    return display;
 }
 
 void SyncOverlayDisplayWidth(HWND hwnd) {
@@ -1104,8 +1117,8 @@ bool ReadIniBool(const wchar_t* section, const wchar_t* key, bool fallback) {
 
 void ClampAndRebuildConfig() {
     gConfig.visualPreset = NormalizeVisualPreset(gConfig.visualPreset);
-    gConfig.width = std::max(240, gConfig.width);
-    gConfig.height = std::max(90, gConfig.height);
+    gConfig.width = std::max(kMinOverlayWidth, gConfig.width);
+    gConfig.height = std::max(kMinOverlayHeight, gConfig.height);
     gConfig.durationMs = std::max(120, gConfig.durationMs);
     gConfig.travelPx = std::max(40, gConfig.travelPx);
     gConfig.noteWidth = ClampInt(gConfig.noteWidth, 24, 220);
@@ -1675,12 +1688,16 @@ void RefreshDifficultyDisplay(double nowMs = NowMs()) {
     const std::wstring oldPrevious = WindowText(previousControl);
     gDifficultySnapshot = gConfig.difficultyEnabled && gCaptureMode == CaptureMode::None ?
         EvaluateLiveDifficulty(nowMs) : pattern::Snapshot{};
-    const auto oldSkills = revive_aux::Details(gReviveLive.Current()) + gReviveLive.Current().status;
+    auto skillsText = [] {
+        return revive_aux::Details(gReviveLive.Current()) + gReviveLive.Current().status +
+            revive_aux::Details(gCompletedSkills.Completed());
+    };
+    const auto oldSkills = skillsText();
     gReviveLive.Update(nowMs, gConfig.difficultyEnabled && gCaptureMode == CaptureMode::None,
         gAnalysisKeys.Keys(), gDifficultySnapshot.keyModePending, gDifficultySnapshot.keyModeConflict,
         gDifficultySnapshot.limited);
-    const bool skillsChanged = oldSkills != revive_aux::Details(gReviveLive.Current()) + gReviveLive.Current().status;
-    if (gConfig.difficultyEnabled && gCaptureMode == CaptureMode::None) gPatternSummary.Observe(gDifficultySnapshot);
+    if (gConfig.difficultyEnabled && gCaptureMode == CaptureMode::None) ObservePatternSummary(gDifficultySnapshot);
+    const bool skillsChanged = oldSkills != skillsText();
     ObserveSessionReport(gDifficultySnapshot, nowMs);
     PollReportWrites();
     RefreshReportStatus();
@@ -1778,6 +1795,21 @@ void DrawLnComparison(HDC dc, int width, int top, const std::wstring& value) {
     DrawTextW(dc,text.c_str(),-1,&number,DT_CENTER|DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
 }
 
+// Narrow HUDs have one LN cell: live input first, then the finished pattern.
+std::wstring HudLnValue(int width) {
+    const auto value = pattern::FormatLnDan(gDifficultySnapshot);
+    const auto previous = pattern::FormatLnDan(gPatternSummary.Completed());
+    if (previous.empty()) return value;
+    if (value.empty()) return L"완료 " + previous.substr(3);
+    return width >= 600 ? value + L" · 완료 " + previous : value;
+}
+
+// Keep the labelled previous result while new input is still collecting.
+// The live meter remains independent and takes over once it has valid axes.
+bool ShowsCompletedSkills() {
+    return !gReviveLive.Current().ready && gCompletedSkills.Completed().ready;
+}
+
 void DrawDifficultyHud(HDC dc, int width, int headerHeight) {
     if (headerHeight == 0) return;
     EnsureHudFonts();
@@ -1822,14 +1854,12 @@ void DrawDifficultyHud(HDC dc, int width, int headerHeight) {
             preferred, number.bottom - number.top));
         DrawTextW(dc, values[i].c_str(), -1, &number, DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
     }
-    if (layout.liveLnHeight) {
-        auto value = pattern::FormatLnDan(gDifficultySnapshot);
-        const auto previous = pattern::FormatLnDan(gPatternSummary.Completed());
-        if (width >= 600 && !previous.empty()) value += L" · 완료 " + previous;
-        DrawLnComparison(dc, width, layout.mainHeight, value);
+    if (layout.liveLnHeight) DrawLnComparison(dc, width, layout.mainHeight, HudLnValue(width));
+    if (layout.mainHeight) {
+        const bool completed = ShowsCompletedSkills();
+        DrawSkillGrid(dc, width, layout.mainHeight + layout.liveLnHeight, completed ? L"보조지표 · 완료" : L"보조지표",
+            completed ? gCompletedSkills.Completed() : gReviveLive.Current(), layout);
     }
-    if (layout.mainHeight) DrawSkillGrid(dc, width, layout.mainHeight + layout.liveLnHeight,
-        L"보조지표", gReviveLive.Current(), layout);
 #if KEYNOTE_OSU_MEMORY_LINK
     if (gOsuView.enabled) {
         RECT row{4, layout.selectedTop, width - 4, layout.selectedTop + 18};
@@ -1868,7 +1898,7 @@ void RecordDifficultyInput(int lane, bool down, double timeMs) {
         // first key of the next session. The estimator may reset on this keydown.
         const auto before = EvaluateLiveDifficulty(timeMs);
         startsFreshSession = before.idle;
-        gPatternSummary.Observe(before);
+        ObservePatternSummary(before);
         ObserveSessionReport(before, timeMs);
         gDifficulty.KeyDown(lane, timeMs);
     }
@@ -1891,7 +1921,7 @@ void RecordDifficultyInput(int lane, bool down, double timeMs) {
             pattern::Snapshot invalid;
             invalid.idle = false;
             invalid.keyModeConflict = true;
-            gPatternSummary.Observe(invalid);
+            ObservePatternSummary(invalid);
             gReportRecorder.Observe(invalid, timeMs);
         }
     }
@@ -2608,7 +2638,7 @@ bool BuildSettingsCandidate(Config& candidate, bool reportErrors) {
     struct Field { int id; int page; const wchar_t* name; int min; int max; int* value; };
     const Field fields[] = {
         {IDC_X, 1, L"X 위치", -32000, 32000, &candidate.x}, {IDC_Y, 1, L"Y 위치", -32000, 32000, &candidate.y},
-        {IDC_WIDTH, 1, L"가로 크기", 240, 10000, &candidate.width}, {IDC_HEIGHT, 1, L"세로 크기", 90, 4000, &candidate.height},
+        {IDC_WIDTH, 1, L"가로 크기", kMinOverlayWidth, 10000, &candidate.width}, {IDC_HEIGHT, 1, L"세로 크기", kMinOverlayHeight, 4000, &candidate.height},
         {IDC_DURATION, 2, L"사라지는 시간", 120, 5000, &candidate.durationMs}, {IDC_TRAVEL, 2, L"이동 거리", 40, 4000, &candidate.travelPx},
         {IDC_NOTE_WIDTH, 2, L"노트 너비", 24, 220, &candidate.noteWidth}, {IDC_NOTE_HEIGHT, 2, L"노트 높이", 18, 140, &candidate.noteHeight},
         {IDC_LANE_SPACING, 2, L"레인 간격", 50, 160, &candidate.laneSpacingPercent},
@@ -2840,8 +2870,8 @@ void SpawnTestNotes() {
 
 void CenterOverlayDraft() {
     int width = 0, height = 0;
-    if (!ParseInteger(WindowText(GetDlgItem(gSettingsWnd, IDC_WIDTH)), 240, 10000, width) ||
-        !ParseInteger(WindowText(GetDlgItem(gSettingsWnd, IDC_HEIGHT)), 90, 4000, height)) {
+    if (!ParseInteger(WindowText(GetDlgItem(gSettingsWnd, IDC_WIDTH)), kMinOverlayWidth, 10000, width) ||
+        !ParseInteger(WindowText(GetDlgItem(gSettingsWnd, IDC_HEIGHT)), kMinOverlayHeight, 4000, height)) {
         SetStatus(L"먼저 유효한 가로·세로 크기를 입력해 주세요."); return;
     }
     MONITORINFO info{sizeof(info), {}, {}, 0};
@@ -2866,9 +2896,9 @@ void ResizeOverlayDraft(double factor) {
 #if KEYNOTE_OSU_MEMORY_LINK
     if (gOsuView.enabled) reserved += 28;
 #endif
-    int height = scaled(draft.height, std::max(90, reserved + effectiveHeight + 16), 4000);
+    int height = scaled(draft.height, std::max(kMinOverlayHeight, reserved + effectiveHeight + 16), 4000);
     if (factor < 1.0) height = std::min(height, draft.height);
-    SetEditInt(gSettingsWnd, IDC_WIDTH, scaled(draft.width, 240, 10000));
+    SetEditInt(gSettingsWnd, IDC_WIDTH, scaled(draft.width, kMinOverlayWidth, 10000));
     SetEditInt(gSettingsWnd, IDC_HEIGHT, height);
     SetEditInt(gSettingsWnd, IDC_NOTE_WIDTH, noteWidth);
     SetEditInt(gSettingsWnd, IDC_NOTE_HEIGHT, noteHeight);
@@ -2994,7 +3024,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         MakeButton(hwnd, IDC_CENTER, L"이 모니터 중앙으로", 390, 132, 238, 30);
         MakeButton(hwnd, IDC_MOVE_MODE, L"마우스로 위치 이동", 38, 174, 200, 30);
         MakeButton(hwnd, IDC_SAVE_POSITION, L"위치 저장", 248, 174, 160, 30);
-        MakeLabel(hwnd, L"오버레이 크기 (px)", 38, 218, 220, 24);
+        MakeLabel(hwnd, L"오버레이 크기 · 최소 650 × 300px", 38, 218, 370, 24);
         MakeButton(hwnd, IDC_SIZE_SMALLER, L"10% 축소", 430, 214, 110, 30);
         MakeButton(hwnd, IDC_SIZE_LARGER, L"10% 확대", 552, 214, 110, 30);
         MakeLabel(hwnd, L"창·노트 함께 조절\n레벨 글자 크기는 유지", 430, 252, 232, 40);
@@ -3456,6 +3486,24 @@ int RunUiSelfTest(bool blockFirstReport = false) {
         0, 0, 760, 680, nullptr, nullptr, gInstance, nullptr);
     if (!gSettingsWnd) return 1;
     check("initial_clean_state", !gUnapplied && !gUnsaved && !IsWindowVisible(gSettingsWnd));
+    {
+        const auto originalConfig=gConfig;
+        const auto originalJson=gJsonConfigPath,originalIni=gIniConfigPath;
+        gJsonConfigPath=CurrentDirectory()+L"minimum-size-legacy.json";
+        gIniConfigPath=CurrentDirectory()+L"minimum-size-legacy.ini";
+        const std::string oldJson="{\"overlay\":{\"width\":450,\"height\":220,\"x\":123,\"y\":45}}";
+        const std::string oldIni="[overlay]\nwidth=450\nheight=220\nx=123\ny=45\n";
+        check("legacy_small_size_fixtures",WriteTextFile(gJsonConfigPath,oldJson) && WriteTextFile(gIniConfigPath,oldIni));
+        gConfig=Config{};
+        const bool loaded=LoadJsonConfig();ClampAndRebuildConfig();
+        std::string unchanged;
+        check("legacy_json_size_normalized_without_rewrite",loaded && gConfig.width==650 && gConfig.height==300 &&
+            gConfig.x==123 && gConfig.y==45 && ReadTextFile(gJsonConfigPath,unchanged) && unchanged==oldJson);
+        gConfig=Config{};LoadIniConfig();ClampAndRebuildConfig();
+        check("legacy_ini_size_normalized_without_rewrite",gConfig.width==650 && gConfig.height==300 &&
+            gConfig.x==123 && gConfig.y==45 && ReadTextFile(gIniConfigPath,unchanged) && unchanged==oldIni);
+        gConfig=originalConfig;gJsonConfigPath=originalJson;gIniConfigPath=originalIni;RebuildLaneConfig();
+    }
     auto click = [&](int id) { SendMessageW(gSettingsWnd, WM_COMMAND, MAKEWPARAM(id, BN_CLICKED), reinterpret_cast<LPARAM>(GetDlgItem(gSettingsWnd, id))); };
     auto edit = [&](int id, const wchar_t* value) { SetWindowTextW(GetDlgItem(gSettingsWnd, id), value); };
     auto raw = [&]() { return WindowText(GetDlgItem(gSettingsWnd, IDC_LANES)); };
@@ -3643,34 +3691,40 @@ int RunUiSelfTest(bool blockFirstReport = false) {
     gConfig = saved; gSavedConfig = saved; RebuildLaneConfig();
     gUnapplied = gUnsaved = false;
     FillSettingsControls(gSettingsWnd); SaveConfig();
-    edit(IDC_WIDTH, L"800"); edit(IDC_HEIGHT, L"200");
+    edit(IDC_WIDTH, L"800"); edit(IDC_HEIGHT, L"300");
     CenterOverlayDraft();
     MONITORINFO info{sizeof(info), {}, {}, 0};
     bool centerOk = GetMonitorInfoW(MonitorFromWindow(gSettingsWnd, MONITOR_DEFAULTTONEAREST), &info) &&
         WindowText(GetDlgItem(gSettingsWnd, IDC_X)) == std::to_wstring(info.rcWork.left + (info.rcWork.right - info.rcWork.left - 800) / 2) &&
-        WindowText(GetDlgItem(gSettingsWnd, IDC_Y)) == std::to_wstring(info.rcWork.top + (info.rcWork.bottom - info.rcWork.top - 200) / 2);
+        WindowText(GetDlgItem(gSettingsWnd, IDC_Y)) == std::to_wstring(info.rcWork.top + (info.rcWork.bottom - info.rcWork.top - 300) / 2);
     check("center_uses_current_monitor", centerOk && SameConfig(gConfig, saved));
     click(IDC_REVERT);
     {
         const Config beforeSizing = gConfig;
-        edit(IDC_WIDTH, L"900"); edit(IDC_HEIGHT, L"220");
+        edit(IDC_WIDTH, L"900"); edit(IDC_HEIGHT, L"400");
         edit(IDC_NOTE_WIDTH, L"58"); edit(IDC_NOTE_HEIGHT, L"34"); edit(IDC_TRAVEL, L"180");
         edit(IDC_X, L"123"); edit(IDC_LANE_SPACING, L"85");
         click(IDC_SIZE_SMALLER);
         Config smaller;
         check("resize_scales_window_notes_and_travel", BuildSettingsCandidate(smaller, false) &&
-            smaller.width == 810 && smaller.height == 198 && smaller.noteWidth == 52 &&
+            smaller.width == 810 && smaller.height == 360 && smaller.noteWidth == 52 &&
             smaller.noteHeight == 31 && smaller.travelPx == 162);
         check("resize_is_draft_and_preserves_other_fields", SameConfig(gConfig, beforeSizing) && gUnapplied &&
             smaller.x == 123 && smaller.laneSpacingPercent == 85 && smaller.lanesText == beforeSizing.lanesText);
         click(IDC_SIZE_LARGER);
         Config larger;
         check("resize_grows_current_draft", BuildSettingsCandidate(larger, false) && larger.width == 891 &&
-            larger.height == 218 && larger.noteWidth == 57 && larger.noteHeight == 34 && larger.travelPx == 178);
+            larger.height == 396 && larger.noteWidth == 57 && larger.noteHeight == 34 && larger.travelPx == 178);
         for (int i = 0; i < 40; ++i) click(IDC_SIZE_SMALLER);
         check("resize_minimum_keeps_note_below_hud", BuildSettingsCandidate(smaller, false) &&
-            smaller.width == 240 && smaller.noteWidth == 24 && smaller.noteHeight == 18 && smaller.travelPx == 40 &&
-            smaller.height >= 76 + smaller.noteHeight + 16);
+            smaller.width == 650 && smaller.noteWidth == 24 && smaller.noteHeight == 18 && smaller.travelPx == 40 &&
+            smaller.height == 300);
+        edit(IDC_WIDTH,L"649");
+        check("width_below_650_is_rejected", !BuildSettingsCandidate(smaller,false) && SameConfig(gConfig,beforeSizing));
+        edit(IDC_WIDTH,L"650");edit(IDC_HEIGHT,L"299");
+        check("height_below_300_is_rejected", !BuildSettingsCandidate(smaller,false) && SameConfig(gConfig,beforeSizing));
+        edit(IDC_HEIGHT,L"300");
+        check("exact_minimum_dimensions_are_accepted", BuildSettingsCandidate(smaller,false) && smaller.width==650 && smaller.height==300);
         edit(IDC_WIDTH, L"invalid");
         const auto heightBefore = WindowText(GetDlgItem(gSettingsWnd, IDC_HEIGHT));
         click(IDC_SIZE_SMALLER);
@@ -3686,7 +3740,7 @@ int RunUiSelfTest(bool blockFirstReport = false) {
         SendMessageW(gSettingsWnd, WM_HSCROLL, MAKEWPARAM(TB_THUMBTRACK, 65), reinterpret_cast<LPARAM>(slider));
         check("spacing_slider_updates_draft_only", WindowText(GetDlgItem(gSettingsWnd, IDC_LANE_SPACING)) == L"65" &&
             SameConfig(gConfig, beforeSizing) && gUnapplied);
-        edit(IDC_WIDTH, L"900"); edit(IDC_HEIGHT, L"220"); click(IDC_SIZE_SMALLER);
+        edit(IDC_WIDTH, L"900"); edit(IDC_HEIGHT, L"300"); click(IDC_SIZE_SMALLER);
         check("size_and_spacing_save", SaveSettings());
         const Config sized = gConfig;
         gConfig = Config{};
@@ -3731,6 +3785,14 @@ int RunUiSelfTest(bool blockFirstReport = false) {
         WindowText(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_NPS)) == L"NPS  0.0");
     RefreshDifficultyDisplay(15000);
     check("finished_level_stays_when_idle", PreviousPatternValue() == completedText);
+    check("finished_pattern_keeps_auxiliary_axes", !gReviveLive.Current().ready && ShowsCompletedSkills());
+    const auto completedLn = pattern::FormatLnDan(gPatternSummary.Completed());
+    check("compact_ln_row_shows_finished_pattern", !completedLn.empty() &&
+        HudLnValue(450) == L"완료 " + completedLn.substr(3) && HudLnValue(900) == HudLnValue(450));
+    const auto beforePendingInput = gDifficultySnapshot;
+    gDifficultySnapshot.idle = false; // first few keys after a completed session
+    check("pending_input_keeps_completed_axes_visible", ShowsCompletedSkills());
+    gDifficultySnapshot = beforePendingInput;
     RECT liveRect{}, previousRect{}, npsRect{};
     GetWindowRect(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_SCORE), &liveRect);
     GetWindowRect(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_PREVIOUS), &previousRect);
@@ -4535,6 +4597,7 @@ int RunUiSelfTest(bool blockFirstReport = false) {
     SyncOverlayDisplayWidth(foldWindow);
     RECT foldedRect{}; GetClientRect(foldWindow, &foldedRect);
     check("folding_changes_window_not_saved_width", foldWindow && foldedRect.right == folded.width && gConfig.width == configuredWidth);
+    check("folding_respects_minimum_window_size", foldedRect.right>=650 && foldedRect.bottom>=300);
     const bool priorHud = gConfig.difficultyHud, priorBackground = gConfig.debugBackground, priorLanes = gConfig.laneBackground;
     gConfig.difficultyHud = gConfig.debugBackground = gConfig.laneBackground = false;
     Note foldedNote; foldedNote.lane = 6; foldedNote.label = gConfig.lanes[6].label; foldedNote.pressMs = 227900;
@@ -4596,6 +4659,74 @@ int RunUiSelfTest(bool blockFirstReport = false) {
             check("other_keys_six_large_skills_render",renderHud(240,90,name.c_str()));
         }
     }
+    // Reproduce the reported compact-HUD sequence using accepted input only:
+    // play -> ten seconds idle -> a few typed keys -> another full play.
+    gConfig.lanesText=L"D,F,J,K";gConfig.analysisKeyMode=0;gConfig.gameOverlay=false;gConfig.reportAutoSave=false;
+    RebuildLaneConfig();ResetDifficulty(4);ShowSettingsPage(3);
+#if KEYNOTE_OSU_MEMORY_LINK
+    const auto beforeCompletionPreview=gOsuView;gOsuView={};
+#endif
+    for(int i=0;i<32;++i) {
+        RecordDifficultyInput(i%4,true,300000+i*250.);
+        RecordDifficultyInput(i%4,false,300170+i*250.);
+    }
+    RefreshDifficultyDisplay(308000);
+    for(int retry=0;retry<200 && gReviveLive.Busy();++retry) {Sleep(2);RefreshDifficultyDisplay(308000);}
+    const auto lastLiveSkills=gReviveLive.Current();
+    check("completion_fixture_has_six_axes_and_hold",lastLiveSkills.ready && lastLiveSkills.skills[5]>0);
+    RefreshDifficultyDisplay(318000);
+    const auto finishedSkills=gCompletedSkills.Completed();
+    const auto finishedLevel=PreviousPatternValue(),finishedLn=HudLnValue(450);
+    check("completed_input_keeps_all_six_axes",ShowsCompletedSkills() && finishedSkills.skills==lastLiveSkills.skills);
+    check("completed_ln_visible_at_all_widths",!finishedLn.empty() && finishedLn.rfind(L"완료 ",0)==0 &&
+        HudLnValue(240)==finishedLn && HudLnValue(599)==finishedLn && HudLnValue(600)==finishedLn);
+    check("completed_hud_renders_compact_and_wide",renderHud(450,320,L"hud-completed-450.bmp") &&
+        renderHud(240,320,L"hud-completed-240.bmp") && renderHud(900,320,L"hud-completed-900.bmp"));
+    check("completed_hud_renders_at_new_minimum",renderHud(650,300,L"hud-completed-650.bmp"));
+    RecordDifficultyInput(0,true,318100);RecordDifficultyInput(0,false,318130);
+    RefreshDifficultyDisplay(318200);
+    check("short_input_preserves_completed_display",!gDifficultySnapshot.idle && !gDifficultySnapshot.ready &&
+        ShowsCompletedSkills() && gCompletedSkills.Completed().skills==finishedSkills.skills &&
+        PreviousPatternValue()==finishedLevel && HudLnValue(450)==finishedLn);
+    check("pending_input_hud_renders_completed_values",renderHud(450,320,L"hud-completed-pending-450.bmp"));
+    RefreshDifficultyDisplay(328130);
+    check("short_session_does_not_replace_completed_results",ShowsCompletedSkills() &&
+        gCompletedSkills.Completed().skills==finishedSkills.skills && PreviousPatternValue()==finishedLevel);
+    for(int i=0;i<32;++i) {
+        RecordDifficultyInput(i%4,true,330000+i*200.);
+        RecordDifficultyInput(i%4,false,330030+i*200.);
+    }
+    RefreshDifficultyDisplay(336400);
+    for(int retry=0;retry<200 && gReviveLive.Busy();++retry) {Sleep(2);RefreshDifficultyDisplay(336400);}
+    const auto nextLiveSkills=gReviveLive.Current();
+    check("valid_new_input_prefers_live_axes",nextLiveSkills.ready && !ShowsCompletedSkills() && nextLiveSkills.skills[5]==0);
+    RefreshDifficultyDisplay(346230);
+    check("next_completed_play_replaces_old_axes",ShowsCompletedSkills() &&
+        gCompletedSkills.Completed().skills==nextLiveSkills.skills && gCompletedSkills.Completed().skills[5]==0);
+    for(int i=0;i<32;++i) {
+        RecordDifficultyInput(i%4,true,350000+i*200.);
+        RecordDifficultyInput(i%4,false,350030+i*200.);
+    }
+    RefreshDifficultyDisplay(356400);
+    for(int retry=0;retry<200 && gReviveLive.Busy();++retry) {Sleep(2);RefreshDifficultyDisplay(356400);}
+    const auto firstLiveSkills=gReviveLive.Current();
+    for(int i=0;i<32;++i) {
+        RecordDifficultyInput(i%4,true,356500+i*250.);
+        RecordDifficultyInput(i%4,false,356670+i*250.);
+    }
+    RefreshDifficultyDisplay(364500);
+    for(int retry=0;retry<200 && gReviveLive.Busy();++retry) {Sleep(2);RefreshDifficultyDisplay(364500);}
+    const auto updatedLiveSkills=gReviveLive.Current();
+    check("live_axes_keep_updating_while_previous_result_exists",firstLiveSkills.ready && firstLiveSkills.skills[5]==0 &&
+        updatedLiveSkills.ready && !ShowsCompletedSkills() && updatedLiveSkills.skills!=firstLiveSkills.skills &&
+        updatedLiveSkills.skills[5]>0 && gCompletedSkills.Completed().skills==nextLiveSkills.skills);
+    check("updated_live_hud_renders_at_new_minimum",renderHud(650,300,L"hud-live-updated-650.bmp"));
+    ResetDifficulty(4);
+    RefreshDifficultyDisplay(365000);
+    check("explicit_reset_clears_completed_display",!ShowsCompletedSkills() && !gCompletedSkills.Completed().ready && HudLnValue(650).empty());
+#if KEYNOTE_OSU_MEMORY_LINK
+    gOsuView=beforeCompletionPreview;
+#endif
     gConfig=beforeAllKeys; RebuildLaneConfig(); ResetDifficulty(static_cast<int>(gConfig.lanes.size()));
     // Remove only the fresh directory owned by this test invocation.
     if (reportRootCreated) {

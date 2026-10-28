@@ -61,4 +61,18 @@ private:
     double next_ = 0;
     std::wstring gate_;
 };
+
+// Axes of a session's strongest stretch, kept after the 8-second window
+// expires. Mirrors pattern::PatternSummary: only an idle transition publishes,
+// and an input limit or key conflict withholds the whole session.
+class CompletedSkills {
+public:
+    void Observe(const revive_aux::Summary& live, bool idle, bool counted, bool blocked, double strength);
+    void Reset() { peak_ = completed_ = {}; best_ = 0; blocked_ = counted_ = false; }
+    const revive_aux::Summary& Completed() const { return completed_; }
+private:
+    revive_aux::Summary peak_, completed_;
+    double best_ = 0;
+    bool blocked_ = false, counted_ = false;
+};
 }

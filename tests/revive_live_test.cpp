@@ -185,6 +185,29 @@ int main() {
         check("six_cells_fit_grid", layout.columns * (6 / layout.columns) == 6 && (width - 8) / layout.columns >= 97);
         check("notes_keep_space_below_all_axes", revive_hud::PresentationHeight(90,28,layout) >= layout.total + 44);
     }
+    revive_aux::Summary weak, strong; weak.ready = strong.ready = true; weak.skills[0] = 10; strong.skills[0] = 80;
+    revive_live::CompletedSkills completed;
+    completed.Observe(strong, false, true, false, 9); completed.Observe(weak, false, true, false, 3);
+    completed.Observe(revive_aux::Summary{}, false, true, false, 12); // axes not ready at the rating peak
+    check("completed_axes_wait_for_idle", !completed.Completed().ready);
+    completed.Observe(revive_aux::Summary{}, true, false, false, 0);
+    check("completed_axes_keep_strongest_stretch", completed.Completed().ready && completed.Completed().skills[0] == 80);
+    completed.Observe(weak, false, true, true, 20); completed.Observe(revive_aux::Summary{}, true, false, false, 0);
+    check("blocked_session_keeps_previous_axes", completed.Completed().skills[0] == 80);
+    completed.Observe(weak, false, true, false, 1); completed.Observe(revive_aux::Summary{}, true, false, false, 0);
+    check("next_session_replaces_axes", completed.Completed().skills[0] == 10);
+    completed.Observe(strong, false, false, false, 9);
+    completed.Observe(revive_aux::Summary{}, true, false, false, 0);
+    check("unqualified_input_keeps_previous_axes", completed.Completed().skills[0] == 10);
+    completed.Observe(revive_aux::Summary{}, false, true, false, 12);
+    completed.Observe(strong, false, false, false, 12); // async axes arrive during a retained rating
+    completed.Observe(revive_aux::Summary{}, true, false, false, 0);
+    check("late_axes_still_belong_to_qualified_session", completed.Completed().skills[0] == 80);
+    completed.Observe(revive_aux::Summary{}, false, true, false, 12);
+    completed.Observe(revive_aux::Summary{}, true, false, false, 0);
+    check("missing_new_axes_do_not_relabel_previous_session", !completed.Completed().ready);
+    completed.Reset();
+    check("completed_axes_reset", !completed.Completed().ready);
     meter.Stop();
     std::cout << "checks=" << checks << " failures=" << failures << '\n';
     return failures ? 1 : 0;

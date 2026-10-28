@@ -116,4 +116,21 @@ void Meter::Stop() {
     if (cancelled_) cancelled_->store(true);
     if (job_.valid()) job_.wait();
 }
+
+void CompletedSkills::Observe(const revive_aux::Summary& live, bool idle, bool counted, bool blocked, double strength) {
+    if (idle) {
+        // A newly completed rating must not inherit axes from an older play
+        // if every auxiliary calculation failed. Short unqualified input,
+        // however, leaves both previous results intact.
+        if (counted_ && !blocked_) completed_ = peak_;
+        peak_ = {}; best_ = 0; blocked_ = counted_ = false;
+        return;
+    }
+    if (blocked) blocked_ = true;
+    counted_ = counted_ || counted;
+    if (!counted_ || blocked_ || !live.ready) return;
+    // An asynchronous result may arrive after the live rating is retained.
+    // Accept that first result, but only fresh ratings can replace the peak.
+    if (!peak_.ready || (counted && strength >= best_)) { peak_ = live; best_ = strength; }
+}
 }
