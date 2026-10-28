@@ -74,7 +74,7 @@ Sample Window::Snapshot(double nowMs, int analysisKeys) {
 Meter::~Meter() { Stop(); }
 void Meter::Invalidate(const std::wstring& status) {
     if (cancelled_) cancelled_->store(true);
-    ++generation_; summary_ = {}; summary_.status = status; next_ = 0;
+    ++generation_; summary_ = {}; rating_ = {}; summary_.status = status; next_ = 0;
 }
 void Meter::Reset(int lanes) {
     analysisKeys_ = 0; window_.Reset(lanes); gate_.clear(); Invalidate(L"입력 대기");
@@ -84,10 +84,14 @@ void Meter::Key(int lane, bool down, double nowMs) {
     window_.Key(lane, down, nowMs);
     if (window_.Session() != session) { gate_.clear(); Invalidate(L"입력 수집 중"); }
 }
-void Meter::Update(double nowMs, bool enabled, int analysisKeys, bool pending, bool conflict, bool limited) {
-    if (analysisKeys != analysisKeys_) {
-        analysisKeys_ = analysisKeys; gate_.clear(); Invalidate(L"입력 수집 중");
+void Meter::SetAnalysisKeys(int keys) {
+    if (keys != analysisKeys_) {
+        analysisKeys_ = keys; gate_.clear(); Invalidate(L"입력 수집 중");
     }
+}
+void Meter::Update(double nowMs, bool enabled, int analysisKeys, bool pending, bool conflict, bool limited,
+    RatingContext rating) {
+    SetAnalysisKeys(analysisKeys);
     Sample sample;
     std::wstring gate = !enabled ? L"OFF" : conflict ? L"키 수 확인" : pending ? L"키 추정 중" :
         limited ? L"입력 한도 · 보류" : L"";
@@ -97,7 +101,10 @@ void Meter::Update(double nowMs, bool enabled, int analysisKeys, bool pending, b
         revive_aux::Summary completed;
         try { completed = job_.get(); }
         catch (const std::exception&) { completed.status = L"계산 보류"; }
-        if (jobGeneration_ == generation_ && gate.empty()) summary_ = std::move(completed);
+        if (jobGeneration_ == generation_ && gate.empty()) {
+            summary_ = std::move(completed);
+            rating_ = summary_.ready ? jobRating_ : RatingContext{};
+        }
         cancelled_.reset();
     }
     if (!gate.empty()) { summary_.ready = false; summary_.status = gate; return; }
@@ -105,15 +112,35 @@ void Meter::Update(double nowMs, bool enabled, int analysisKeys, bool pending, b
     next_ = nowMs + RefreshMs;
     cancelled_ = std::make_shared<std::atomic<bool>>(false);
     jobGeneration_ = generation_;
+    jobRating_ = rating;
     try {
         job_ = std::async(std::launch::async, [sample = std::move(sample), cancel = cancelled_] {
             return revive_aux::Analyze(sample.chart, cancel.get(), sample.durationMs, std::chrono::milliseconds(100));
         });
         if (!summary_.ready) summary_.status = L"계산 중";
-    } catch (const std::exception&) { summary_ = {}; summary_.status = L"계산 보류"; }
+    } catch (const std::exception&) { summary_ = {}; rating_ = {}; summary_.status = L"계산 보류"; }
 }
 void Meter::Stop() {
     if (cancelled_) cancelled_->store(true);
     if (job_.valid()) job_.wait();
+}
+
+void CompletedSkills::Observe(const revive_aux::Summary& live, const RatingContext& sourceRating,
+    bool idle, bool counted, bool blocked) {
+    if (idle) {
+        // A newly completed rating must not inherit axes from an older play
+        // if every auxiliary calculation failed. Short unqualified input,
+        // however, leaves both previous results intact.
+        if (counted_ && !blocked_) completed_ = peak_;
+        peak_ = {}; best_ = 0; blocked_ = counted_ = false;
+        return;
+    }
+    if (blocked) blocked_ = true;
+    counted_ = counted_ || counted;
+    if (!counted_ || blocked_ || !live.ready || !sourceRating.ready ||
+        !std::isfinite(sourceRating.strength) || sourceRating.strength < 0) return;
+    // Re-reading an old result must not attach a newer primary peak to it.
+    // A stronger queued window can still replace it after the rating is retained.
+    if (!peak_.ready || sourceRating.strength >= best_) { peak_ = live; best_ = sourceRating.strength; }
 }
 }

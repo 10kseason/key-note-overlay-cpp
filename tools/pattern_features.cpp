@@ -43,7 +43,7 @@ int main(int argc, char** argv) {
         // Keep the published reference scale stable. Live LN feedback applies a
         // separate 2/3 multiplier; rebuilding references with it would offset
         // the requested reduction and also move tap-only Dan/table thresholds.
-        pattern::DifficultyEstimator estimator(keys, 1.0);
+        pattern::DifficultyEstimator estimator(keys, 1.0, input_timing::HoldTiming::ReferenceReplay);
         std::vector<pattern::Snapshot> windows;
         std::size_t next = 0;
         for (double time = origin + 8000.0; time <= events.back().time; time += 2000.0) {

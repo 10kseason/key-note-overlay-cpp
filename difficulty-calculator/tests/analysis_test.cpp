@@ -8,8 +8,8 @@
 #include <stdexcept>
 
 namespace {
-// Independent millisecond callback simulation: releases, keydown callbacks,
-// then the UI timer. Fixtures use integer milliseconds and no tap overlaps.
+// Independent reference replay: releases, keydown callbacks, then the UI timer.
+// Preserve published file timing rather than infer LNs from physical tap dwell.
 chartcalc::Analysis SimulateLive(const chartcalc::Chart& chart) {
     struct Event { int lane; bool down; };
     std::map<int, std::vector<Event>> events;
@@ -21,7 +21,7 @@ chartcalc::Analysis SimulateLive(const chartcalc::Chart& chart) {
         events[start].push_back({n.lane,true}); events[release].push_back({n.lane,false});
         end=std::max(end,release);
     }
-    pattern::DifficultyEstimator estimator(chart.keys);
+    pattern::DifficultyEstimator estimator(chart.keys, pattern::DefaultHoldWeight, input_timing::HoldTiming::ReferenceReplay);
     pattern::LiveContinuity continuity;
     pattern::PatternSummary peak;
     chartcalc::Analysis result;
@@ -99,6 +99,10 @@ int main() {
     check("four_key_ln_comparison_in_report",chartcalc::RenderReport(shortResult).find("4K LN Dan Courses v2 보조 비교: LN")!=std::string::npos);
     check("baseline_weight_does_not_use_live_ln_reference",chartcalc::RenderReport(chartcalc::Analyze(brief,1.0)).find("4K LN Dan Courses v2 보조 비교:")==std::string::npos);
     check("short_chart_matches_live_warmup",shortResult.points.size()==31 && Same(shortResult.summary,SimulateLive(brief).summary));
+    chartcalc::Chart shortLn;shortLn.keys=4;
+    for(int i=0;i<96;++i)shortLn.notes.push_back({i%4,200+i*80.,200+i*80.+(i%3?0:120)});
+    check("known_short_ln_keeps_pre_fix_file_scale",std::abs(chartcalc::Analyze(shortLn).summary.stars-2.4320728709535455)<1e-10 &&
+        std::abs(chartcalc::Analyze(shortLn,1.0).summary.stars-2.5103870350694764)<1e-10);
     auto warmup=brief; warmup.notes.resize(12);
     check("insufficient_live_warmup_is_not_rated",!chartcalc::Analyze(warmup).summary.ready);
     chartcalc::Chart early; early.keys=10;

@@ -60,6 +60,9 @@ constexpr UINT ID_TRAY_EXIT = 40002;
 constexpr UINT ID_TRAY_MOVE = 40003;
 constexpr UINT TRAY_ICON_ID = 1;
 constexpr COLORREF kTransparentKey = RGB(1, 2, 3);
+constexpr int kMinOverlayWidth = 650;
+constexpr int kMinFoldedWidth = 250;
+constexpr int kMinOverlayHeight = 300;
 
 constexpr int IDC_LANES = 1001;
 constexpr int IDC_X = 1002;
@@ -138,13 +141,11 @@ constexpr int IDC_SIZE_LARGER = 1077;
 constexpr int IDC_SPACING_SLIDER = 1078;
 constexpr int IDC_OSU_REVIVE = 1079;
 constexpr int IDC_OSU_SKILLS = 1080;
+constexpr int IDC_KEY_VIEWER_FOLDED = 1081;
 
 constexpr double kHoldThresholdMs = 90.0;
 constexpr double kChordAlignWindowMs = 15.0;
 constexpr double kPulseMs = 95.0;
-#ifndef WDA_EXCLUDEFROMCAPTURE
-constexpr DWORD WDA_EXCLUDEFROMCAPTURE = 0x00000011;
-#endif
 
 struct Lane {
     UINT vk = 0;
@@ -162,7 +163,7 @@ struct Config {
     int x = 80;
     int y = 40;
     int width = 900;
-    int height = 220;
+    int height = kMinOverlayHeight;
     int durationMs = 850;
     int travelPx = 180;
     int noteWidth = 58;
@@ -182,7 +183,8 @@ struct Config {
     bool keyTextBottom = true;
     bool difficultyEnabled = true;
     bool difficultyHud = true;
-    int analysisKeyMode = 0; // 0=registered, -1=auto session lock, 4..10=manual
+    bool keyViewerFolded = false; // Presentation only; the registered input stays active.
+    int analysisKeyMode = 0; // 0=registered, -1=auto with upward correction, 4..10=manual
     bool reportAutoSave = false; // Local input timing persistence is explicitly opt-in.
     bool gameOverlay = false;
     std::wstring lanesText = L"A,S,D,F,J,K,L,SEMICOLON";
@@ -267,10 +269,12 @@ std::array<std::vector<HWND>, 5> gPageControls;
 #endif
 pattern::DifficultyEstimator gDifficulty;
 pattern::AnalysisKeySelector gAnalysisKeys;
+int gConfirmedAutoKeys = 0;
 pattern::Snapshot gDifficultySnapshot;
 pattern::PatternSummary gPatternSummary;
 pattern::LiveContinuity gLiveContinuity;
 revive_live::Meter gReviveLive;
+revive_live::CompletedSkills gCompletedSkills;
 report::Recorder gReportRecorder;
 std::deque<report::Session> gPendingReports;
 std::future<report::SaveResult> gReportWrite;
@@ -442,32 +446,64 @@ void ResetDifficulty(int lanes) {
     gReportWaitForFreshSession = false;
     gDifficulty.Reset(lanes);
     gAnalysisKeys.Reset(lanes, gConfig.analysisKeyMode);
+    gConfirmedAutoKeys = 0;
     gPatternSummary.Reset();
+    gCompletedSkills.Reset();
     gLiveContinuity.Reset();
     gReviveLive.Reset(lanes);
 }
 
+void ObservePatternSummary(const pattern::Snapshot& s) {
+    gPatternSummary.Observe(s);
+    gCompletedSkills.Observe(gReviveLive.Current(), gReviveLive.CurrentRating(),
+        s.idle, s.ready && !s.retained, s.limited || s.keyModeConflict);
+}
+
 pattern::Snapshot EvaluateLiveDifficulty(double nowMs) {
     gAnalysisKeys.Update(nowMs);
+    if (gConfig.analysisKeyMode == -1 && !gAnalysisKeys.Pending() && !gAnalysisKeys.Conflict() &&
+        gConfirmedAutoKeys != gAnalysisKeys.Keys()) {
+        // Do not mix peaks or async results from different inferred key counts.
+        // Keep input history so the corrected mode can resume without relearning.
+        if (gConfirmedAutoKeys) FinishSessionReport("자동 분석 키 수 보정", nowMs);
+        gConfirmedAutoKeys = gAnalysisKeys.Keys();
+        gPatternSummary.Reset(); gCompletedSkills.Reset();
+        gReviveLive.SetAnalysisKeys(gConfirmedAutoKeys);
+    }
     gDifficulty.SetAnalysisKeys(gConfig.analysisKeyMode == 0 ? 0 : gAnalysisKeys.Keys());
     auto raw = gDifficulty.Evaluate(nowMs, true);
     raw.keyModePending = gAnalysisKeys.Pending();
-    raw.keyModeConflict = raw.keyModeConflict || gAnalysisKeys.Conflict();
+    raw.keyModeConflict = gAnalysisKeys.Conflict() || (raw.keyModeConflict && !raw.keyModePending);
     if (raw.keyModePending || raw.keyModeConflict) raw.ready = false;
     return gLiveContinuity.Update(raw, nowMs);
 }
 
 overlay::LaneDisplay CurrentLaneDisplay(int fullWidth) {
-    return overlay::MakeLaneDisplay(static_cast<int>(gConfig.lanes.size()), fullWidth,
+    auto display = overlay::MakeLaneDisplay(static_cast<int>(gConfig.lanes.size()), fullWidth,
         gConfig.laneSpacingPercent, gAnalysisKeys,
         gConfig.difficultyEnabled && gConfig.analysisKeyMode != 0 && gCaptureMode == CaptureMode::None);
+    // Folding preserves note geometry but must not bypass the window minimum.
+    display.width = std::max(kMinOverlayWidth, display.width);
+    return display;
+}
+
+bool KeyViewerFolded(const Config& config) { return config.keyViewerFolded && config.difficultyEnabled && config.difficultyHud; }
+bool KeyViewerFolded() { return KeyViewerFolded(gConfig); }
+int MinimumOverlayWidth(const Config& config) { return KeyViewerFolded(config) ? kMinFoldedWidth : kMinOverlayWidth; }
+int FoldedHudPixels(int logical) { return (logical * 3 + 1) / 2; }
+int FoldedHudWidth(int pixels) { return pixels * 2 / 3; }
+bool CompactFoldedHud(int width) { return width < 900; }
+int OverlayPresentationWidth() {
+    // Folded dimensions are physical pixels, independent of registered lanes
+    // and the 150% font transform, so an entered width of 250 really is 250.
+    return KeyViewerFolded() ? std::max(kMinFoldedWidth, gConfig.width) : CurrentLaneDisplay(gConfig.width).width;
 }
 
 void SyncOverlayDisplayWidth(HWND hwnd) {
     if (!hwnd) return;
     RECT client{};
     if (!GetClientRect(hwnd, &client)) return;
-    const int width = CurrentLaneDisplay(gConfig.width).width;
+    const int width = OverlayPresentationWidth();
     const int height = OverlayPresentationHeight(width);
     if (client.right == width && client.bottom == height) return;
     // Temporary presentation dimensions never overwrite the saved size.
@@ -1034,7 +1070,7 @@ bool SameConfig(const Config& a, const Config& b) {
         return std::tie(c.x, c.y, c.width, c.height, c.durationMs, c.travelPx, c.noteWidth, c.noteHeight,
             c.opacityPercent, c.laneSpacingPercent, c.longNoteAlpha, c.visualPreset, c.debugBackground,
             c.clickThrough, c.alwaysOnTop, c.circleNotes, c.laneBackground, c.roundedBoxes, c.thinOutline,
-            c.keyTextBottom, c.difficultyEnabled, c.difficultyHud, c.analysisKeyMode, c.reportAutoSave, c.gameOverlay, c.lanesText, c.presetLanes, c.keyStyles);
+            c.keyTextBottom, c.difficultyEnabled, c.difficultyHud, c.keyViewerFolded, c.analysisKeyMode, c.reportAutoSave, c.gameOverlay, c.lanesText, c.presetLanes, c.keyStyles);
     };
     return values(a) == values(b);
 }
@@ -1104,8 +1140,8 @@ bool ReadIniBool(const wchar_t* section, const wchar_t* key, bool fallback) {
 
 void ClampAndRebuildConfig() {
     gConfig.visualPreset = NormalizeVisualPreset(gConfig.visualPreset);
-    gConfig.width = std::max(240, gConfig.width);
-    gConfig.height = std::max(90, gConfig.height);
+    gConfig.width = std::max(MinimumOverlayWidth(gConfig), gConfig.width);
+    gConfig.height = std::max(kMinOverlayHeight, gConfig.height);
     gConfig.durationMs = std::max(120, gConfig.durationMs);
     gConfig.travelPx = std::max(40, gConfig.travelPx);
     gConfig.noteWidth = ClampInt(gConfig.noteWidth, 24, 220);
@@ -1162,6 +1198,7 @@ void LoadIniConfig() {
     gConfig.keyTextBottom = ReadIniBool(L"overlay", L"key_text_bottom", gConfig.keyTextBottom);
     gConfig.difficultyEnabled = ReadIniBool(L"overlay", L"difficulty_enabled", gConfig.difficultyEnabled);
     gConfig.difficultyHud = ReadIniBool(L"overlay", L"difficulty_hud", gConfig.difficultyHud);
+    gConfig.keyViewerFolded = ReadIniBool(L"overlay", L"key_viewer_folded", gConfig.keyViewerFolded);
     gConfig.analysisKeyMode = pattern::NormalizeAnalysisKeyMode(ReadIniInt(L"overlay", L"analysis_key_mode", gConfig.analysisKeyMode));
     gConfig.reportAutoSave = ReadIniBool(L"overlay", L"report_auto_save", gConfig.reportAutoSave);
     gConfig.gameOverlay = ReadIniBool(L"overlay", L"game_overlay", gConfig.gameOverlay);
@@ -1241,6 +1278,7 @@ bool LoadJsonConfig() {
     if (JsonReadBool(json, "key_text_bottom", boolValue)) gConfig.keyTextBottom = boolValue;
     if (JsonReadBool(json, "difficulty_enabled", boolValue)) gConfig.difficultyEnabled = boolValue;
     if (JsonReadBool(json, "difficulty_hud", boolValue)) gConfig.difficultyHud = boolValue;
+    if (JsonReadBool(json, "key_viewer_folded", boolValue)) gConfig.keyViewerFolded = boolValue;
     if (JsonReadInt(json, "analysis_key_mode", intValue)) gConfig.analysisKeyMode = pattern::NormalizeAnalysisKeyMode(intValue);
     if (JsonReadBool(json, "report_auto_save", boolValue)) gConfig.reportAutoSave = boolValue;
     if (JsonReadBool(json, "game_overlay", boolValue)) gConfig.gameOverlay = boolValue;
@@ -1302,6 +1340,7 @@ bool SaveIniConfig() {
     field("rounded_boxes", gConfig.roundedBoxes); field("thin_outline", gConfig.thinOutline);
     field("key_text_bottom", gConfig.keyTextBottom);
     field("difficulty_enabled", gConfig.difficultyEnabled); field("difficulty_hud", gConfig.difficultyHud);
+    field("key_viewer_folded", gConfig.keyViewerFolded);
     field("analysis_key_mode", gConfig.analysisKeyMode);
     field("report_auto_save", gConfig.reportAutoSave);
     field("game_overlay", gConfig.gameOverlay);
@@ -1355,6 +1394,7 @@ bool SaveJsonConfig() {
     out << "    \"key_text_bottom\": " << BoolText(gConfig.keyTextBottom) << ",\n";
     out << "    \"difficulty_enabled\": " << BoolText(gConfig.difficultyEnabled) << ",\n";
     out << "    \"difficulty_hud\": " << BoolText(gConfig.difficultyHud) << ",\n";
+    out << "    \"key_viewer_folded\": " << BoolText(gConfig.keyViewerFolded) << ",\n";
     out << "    \"analysis_key_mode\": " << gConfig.analysisKeyMode << ",\n";
     out << "    \"report_auto_save\": " << BoolText(gConfig.reportAutoSave) << ",\n";
     out << "    \"game_overlay\": " << BoolText(gConfig.gameOverlay) << "\n";
@@ -1450,7 +1490,7 @@ std::wstring DifficultyValue() {
     if (gDifficultySnapshot.limited) return L"보류";
     if (gDifficultySnapshot.idle) return L"대기";
     if (gDifficultySnapshot.keyModeConflict) return L"키 수 확인";
-    if (gDifficultySnapshot.keyModePending) return L"키 추정 중";
+    if (gDifficultySnapshot.keyModePending) return gAnalysisKeys.Rechecking() ? L"키 보정 중" : L"키 추정 중";
     if (!gDifficultySnapshot.ready) return L"분석 중";
     return FormatDifficultyRating(gDifficultySnapshot);
 }
@@ -1522,7 +1562,7 @@ std::wstring DifficultyDetails(bool multiline) {
             << L"홀드 중 추가 입력  " << s.holdOverlapPercent << L" %\n"
             << L"최근 8초 입력  " << s.samples << L"회     |     누르고 있는 키  " << s.heldKeys << L"개";
         if (s.keyModeConflict) out << L"\n고정 수보다 많은 키 감지 · 분석 초기화 또는 키 수 설정 변경";
-        else if (s.keyModePending) out << L"\n자동 추정: " << gAnalysisKeys.Observed() << L"키 관측 · 8초/32회/키별 2회 필요";
+        else if (s.keyModePending) out << L"\n자동 추정: " << gAnalysisKeys.Observed() << L"키 관측 · 8초/32회/키별 2회 · 새 키 없이 3초";
         else if (gConfig.analysisKeyMode != 0) out << L"\n" << (gConfig.analysisKeyMode == -1 ? L"자동 고정 " : L"수동 고정 ")
             << gAnalysisKeys.Keys() << L"K · 등록 배치 " << gConfig.lanes.size() << L"키 유지";
         else if (s.retained) out << L"\n입력 연결 대기 · 마지막 추정 유지 (10초 무입력 시 결과 확정)";
@@ -1675,12 +1715,18 @@ void RefreshDifficultyDisplay(double nowMs = NowMs()) {
     const std::wstring oldPrevious = WindowText(previousControl);
     gDifficultySnapshot = gConfig.difficultyEnabled && gCaptureMode == CaptureMode::None ?
         EvaluateLiveDifficulty(nowMs) : pattern::Snapshot{};
-    const auto oldSkills = revive_aux::Details(gReviveLive.Current()) + gReviveLive.Current().status;
+    auto skillsText = [] {
+        return revive_aux::Details(gReviveLive.Current()) + gReviveLive.Current().status +
+            revive_aux::Details(gCompletedSkills.Completed());
+    };
+    const auto oldSkills = skillsText();
     gReviveLive.Update(nowMs, gConfig.difficultyEnabled && gCaptureMode == CaptureMode::None,
         gAnalysisKeys.Keys(), gDifficultySnapshot.keyModePending, gDifficultySnapshot.keyModeConflict,
-        gDifficultySnapshot.limited);
-    const bool skillsChanged = oldSkills != revive_aux::Details(gReviveLive.Current()) + gReviveLive.Current().status;
-    if (gConfig.difficultyEnabled && gCaptureMode == CaptureMode::None) gPatternSummary.Observe(gDifficultySnapshot);
+        gDifficultySnapshot.limited, {gDifficultySnapshot.ready && !gDifficultySnapshot.retained,
+            gDifficultySnapshot.profile == pattern::RatingProfile::Generic ?
+                gDifficultySnapshot.score : gDifficultySnapshot.rating});
+    if (gConfig.difficultyEnabled && gCaptureMode == CaptureMode::None) ObservePatternSummary(gDifficultySnapshot);
+    const bool skillsChanged = oldSkills != skillsText();
     ObserveSessionReport(gDifficultySnapshot, nowMs);
     PollReportWrites();
     RefreshReportStatus();
@@ -1724,7 +1770,17 @@ revive_hud::Layout CurrentHudLayout(int width) {
 }
 
 int DifficultyHeaderHeight(int width, int /*height*/) { return CurrentHudLayout(width).total; }
+int FoldedHudHeight(int width) {
+    if (!CompactFoldedHud(width)) return CurrentHudLayout(FoldedHudWidth(width)).total;
+    // 68 logical pixels for current/completed/NPS/LN + six 22px rows = 300px.
+    int height = 200;
+#if KEYNOTE_OSU_MEMORY_LINK
+    if (gOsuView.enabled) height += 18 + 132 + (gOsuView.ready && gOsuView.keys == 4 ? 16 : 0);
+#endif
+    return height;
+}
 int OverlayPresentationHeight(int width) {
+    if (KeyViewerFolded()) return std::max(gConfig.height, FoldedHudPixels(FoldedHudHeight(width) + (gMoveMode ? 28 : 0)));
     return revive_hud::PresentationHeight(gConfig.height, gConfig.noteHeight, CurrentHudLayout(width));
 }
 
@@ -1778,6 +1834,80 @@ void DrawLnComparison(HDC dc, int width, int top, const std::wstring& value) {
     DrawTextW(dc,text.c_str(),-1,&number,DT_CENTER|DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
 }
 
+// Narrow HUDs have one LN cell: live input first, then the finished pattern.
+std::wstring HudLnValue(int width) {
+    const auto value = pattern::FormatLnDan(gDifficultySnapshot);
+    const auto previous = pattern::FormatLnDan(gPatternSummary.Completed());
+    if (previous.empty()) return value;
+    if (value.empty()) return L"완료 " + previous.substr(3);
+    return width >= 600 ? value + L" · 완료 " + previous : value;
+}
+
+// Keep the labelled previous result while new input is still collecting.
+// The live meter remains independent and takes over once it has valid axes.
+bool ShowsCompletedSkills() {
+    return !gReviveLive.Current().ready && gCompletedSkills.Completed().ready;
+}
+
+void DrawCompactFoldedHud(HDC dc, int width) {
+    EnsureHudFonts();
+    const auto oldFont = SelectObject(dc, gHudSmallFont);
+    SetBkMode(dc, TRANSPARENT);
+    auto panel = [&](int top, int bottom) {
+        RECT rect{4, top, width - 4, bottom};
+        HBRUSH brush = CreateSolidBrush(RGB(10,16,26));
+        FillRect(dc, &rect, brush); DeleteObject(brush);
+    };
+    auto text = [&](const std::wstring& value, RECT rect, HFONT font, COLORREF color, UINT alignment) {
+        SetTextColor(dc,color);
+        SelectObject(dc,FitDifficultyFont(dc,value,rect.right-rect.left,font,rect.bottom-rect.top));
+        DrawTextW(dc,value.c_str(),-1,&rect,DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX|alignment);
+    };
+    const bool completed = ShowsCompletedSkills();
+    for (int i=0;i<2;++i) {
+        const int top=i*26;
+        panel(top,top+26);
+        text(i==0?L"실시간":L"완료",{6,top,52,top+(i==0?13:26)},gHudLabelFont,RGB(209,221,235),DT_LEFT);
+        if(i==0) text(completed?L"보조 완료":gReviveLive.Current().ready?L"보조 측정":L"보조 대기",
+            {6,13,58,26},gHudLabelFont,RGB(184,207,255),DT_LEFT);
+        text(i==0?DifficultyValue():PreviousPatternValue(),{60,top,width-6,top+26},gHudCompactFont,
+            i==0?RGB(112,229,255):RGB(169,245,180),DT_RIGHT);
+    }
+    panel(52,68);
+    std::wostringstream nps; nps<<L"NPS "<<std::fixed<<std::setprecision(1)<<gDifficultySnapshot.currentNps;
+    const bool ln=gDifficultySnapshot.profile==pattern::RatingProfile::Osu4;
+    text(nps.str(),{6,52,ln?74:width-6,68},gHudLabelFont,RGB(255,222,138),DT_LEFT);
+    if(ln) {
+        const auto value=HudLnValue(width);
+        text(value.empty()?L"LN 측정 대기":value,{76,52,width-6,68},gHudLabelFont,RGB(220,195,255),DT_RIGHT);
+    }
+    auto skills = [&](int top, const revive_aux::Summary& summary) {
+        for(int i=0;i<6;++i) {
+            const int y=top+i*22;
+            panel(y,y+22);
+            const COLORREF color=revive_aux::SkillAvailable(summary,i)?RGB(169,245,180):RGB(151,161,176);
+            text(revive_aux::SkillName(i),{6,y,width-48,y+22},gHudSmallFont,color,DT_LEFT);
+            text(revive_aux::SkillValue(summary,i),{width-46,y,width-6,y+22},gHudSmallFont,color,DT_RIGHT);
+        }
+    };
+    skills(68,completed?gCompletedSkills.Completed():gReviveLive.Current());
+#if KEYNOTE_OSU_MEMORY_LINK
+    if(gOsuView.enabled) {
+        panel(200,218);
+        const auto title=gOsuView.ready?L"osu! "+std::to_wstring(gOsuView.keys)+L"K "+gOsuView.difficulty:L"osu! · "+gOsuView.status;
+        text(title,{6,200,width-6,218},gHudLabelFont,RGB(184,207,255),DT_LEFT|DT_END_ELLIPSIS);
+        int top=218;
+        if(gOsuView.ready && gOsuView.keys==4) {
+            panel(top,top+16);
+            text(gOsuView.lnDifficulty,{6,top,width-6,top+16},gHudLabelFont,RGB(220,195,255),DT_LEFT);
+            top+=16;
+        }
+        skills(top,gOsuView.ready?gOsuView.revive:revive_aux::Summary{});
+    }
+#endif
+    SelectObject(dc,oldFont);
+}
+
 void DrawDifficultyHud(HDC dc, int width, int headerHeight) {
     if (headerHeight == 0) return;
     EnsureHudFonts();
@@ -1822,14 +1952,12 @@ void DrawDifficultyHud(HDC dc, int width, int headerHeight) {
             preferred, number.bottom - number.top));
         DrawTextW(dc, values[i].c_str(), -1, &number, DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
     }
-    if (layout.liveLnHeight) {
-        auto value = pattern::FormatLnDan(gDifficultySnapshot);
-        const auto previous = pattern::FormatLnDan(gPatternSummary.Completed());
-        if (width >= 600 && !previous.empty()) value += L" · 완료 " + previous;
-        DrawLnComparison(dc, width, layout.mainHeight, value);
+    if (layout.liveLnHeight) DrawLnComparison(dc, width, layout.mainHeight, HudLnValue(width));
+    if (layout.mainHeight) {
+        const bool completed = ShowsCompletedSkills();
+        DrawSkillGrid(dc, width, layout.mainHeight + layout.liveLnHeight, completed ? L"보조지표 · 완료" : L"보조지표",
+            completed ? gCompletedSkills.Completed() : gReviveLive.Current(), layout);
     }
-    if (layout.mainHeight) DrawSkillGrid(dc, width, layout.mainHeight + layout.liveLnHeight,
-        L"보조지표", gReviveLive.Current(), layout);
 #if KEYNOTE_OSU_MEMORY_LINK
     if (gOsuView.enabled) {
         RECT row{4, layout.selectedTop, width - 4, layout.selectedTop + 18};
@@ -1868,7 +1996,7 @@ void RecordDifficultyInput(int lane, bool down, double timeMs) {
         // first key of the next session. The estimator may reset on this keydown.
         const auto before = EvaluateLiveDifficulty(timeMs);
         startsFreshSession = before.idle;
-        gPatternSummary.Observe(before);
+        ObservePatternSummary(before);
         ObserveSessionReport(before, timeMs);
         gDifficulty.KeyDown(lane, timeMs);
     }
@@ -1887,11 +2015,13 @@ void RecordDifficultyInput(int lane, bool down, double timeMs) {
             }
             gReportRecorder.Key(lane, down, timeMs);
         }
-        if (gAnalysisKeys.Conflict()) {
+        // A newly observed lane makes the old inferred peak untrustworthy even
+        // if playback ends before its second press or the next UI refresh.
+        if (gAnalysisKeys.Conflict() || gAnalysisKeys.Rechecking()) {
             pattern::Snapshot invalid;
             invalid.idle = false;
             invalid.keyModeConflict = true;
-            gPatternSummary.Observe(invalid);
+            ObservePatternSummary(invalid);
             gReportRecorder.Observe(invalid, timeMs);
         }
     }
@@ -1911,8 +2041,8 @@ void ApplyOverlayWindowStyle() {
         gConfig.gameOverlay || gConfig.alwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST,
         gConfig.x,
         gConfig.y,
-        CurrentLaneDisplay(gConfig.width).width,
-        OverlayPresentationHeight(CurrentLaneDisplay(gConfig.width).width),
+        OverlayPresentationWidth(),
+        OverlayPresentationHeight(OverlayPresentationWidth()),
         SWP_NOACTIVATE | SWP_FRAMECHANGED | (gUiSelfTest ? 0 : SWP_SHOWWINDOW)
     );
     if (IsSettingsInteraction(GetForegroundWindow())) SetSettingsForegroundBoost(true);
@@ -2078,6 +2208,33 @@ bool RenderOverlay(overlay::AlphaSurface& frame, double now) {
     if (debugBackground || gMoveMode) FillRect(mem, &client, bg);
     DeleteObject(bg);
 
+    gNotes.erase(std::remove_if(gNotes.begin(), gNotes.end(), [&](const Note& note) {
+        return !note.held && now - note.releaseMs >= gConfig.durationMs;
+    }), gNotes.end());
+    if (KeyViewerFolded()) {
+        // Scale vector text and its layout together, including fallback fonts,
+        // captions, selected-chart rows and NPS. No bitmap stretching is used.
+        const int logicalWidth = FoldedHudWidth(width);
+        const int header = FoldedHudHeight(width);
+        const int saved = SaveDC(mem);
+        const XFORM scale{1.5f,0,0,1.5f,0,0};
+        if (!saved || !SetGraphicsMode(mem, GM_ADVANCED) || !SetWorldTransform(mem, &scale)) {
+            if (saved) RestoreDC(mem,saved);
+            return false;
+        }
+        if (CompactFoldedHud(width)) DrawCompactFoldedHud(mem,logicalWidth);
+        else DrawDifficultyHud(mem,logicalWidth,header);
+        if (gMoveMode) {
+            RECT hint{4,header,logicalWidth-4,header+28};
+            SelectObject(mem,gGuiFont); SetBkMode(mem,TRANSPARENT); SetTextColor(mem,RGB(112,229,255));
+            const auto hintText=CompactFoldedHud(width)?L"이동 · 놓으면 저장":L"이동 모드 · 놓으면 위치 저장";
+            DrawTextW(mem,hintText,-1,&hint,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+        }
+        RestoreDC(mem,saved);
+        frame.FinishGdi();
+        return true; // Neither lanes, key labels nor note/hold animations are drawn.
+    }
+
     const int contentTop = DifficultyHeaderHeight(width, height);
     const int savedDc = SaveDC(mem);
     IntersectClipRect(mem, 0, contentTop, width, height);
@@ -2118,10 +2275,6 @@ bool RenderOverlay(overlay::AlphaSurface& frame, double now) {
         SelectObject(mem, oldPen);
         DeleteObject(gridPen);
     }
-
-    gNotes.erase(std::remove_if(gNotes.begin(), gNotes.end(), [&](const Note& note) {
-        return !note.held && now - note.releaseMs >= gConfig.durationMs;
-    }), gNotes.end());
 
     RestoreDC(mem, savedDc);
     DrawDifficultyHud(mem, width, contentTop);
@@ -2555,6 +2708,7 @@ void FillSettingsControls(HWND hwnd) {
     SendMessageW(GetDlgItem(hwnd, IDC_TOPMOST), BM_SETCHECK, gConfig.alwaysOnTop ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(GetDlgItem(hwnd, IDC_DIFFICULTY_ENABLED), BM_SETCHECK, gConfig.difficultyEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(GetDlgItem(hwnd, IDC_DIFFICULTY_HUD), BM_SETCHECK, gConfig.difficultyHud ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(GetDlgItem(hwnd, IDC_KEY_VIEWER_FOLDED), BM_SETCHECK, gConfig.keyViewerFolded ? BST_CHECKED : BST_UNCHECKED, 0);
     SendDlgItemMessageW(hwnd, IDC_ANALYSIS_KEYS, CB_SETCURSEL,
         gConfig.analysisKeyMode == 0 ? 0 : gConfig.analysisKeyMode == -1 ? 1 : gConfig.analysisKeyMode - 2, 0);
     SendMessageW(GetDlgItem(hwnd, IDC_REPORT_AUTO), BM_SETCHECK, gConfig.reportAutoSave ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -2574,6 +2728,11 @@ void SettingsError(int id, int page, const std::wstring& error) {
 bool BuildSettingsCandidate(Config& candidate, bool reportErrors) {
     // Validate the entire draft before touching the active configuration or key map.
     candidate = gConfig;
+    candidate.keyViewerFolded = SendDlgItemMessageW(gSettingsWnd,IDC_KEY_VIEWER_FOLDED,BM_GETCHECK,0,0)==BST_CHECKED;
+    candidate.difficultyEnabled = SendDlgItemMessageW(gSettingsWnd,IDC_DIFFICULTY_ENABLED,BM_GETCHECK,0,0)==BST_CHECKED;
+    candidate.difficultyHud = SendDlgItemMessageW(gSettingsWnd,IDC_DIFFICULTY_HUD,BM_GETCHECK,0,0)==BST_CHECKED;
+    // Turning folding/HUD off restores the normal minimum in the same apply.
+    const int minWidth = KeyViewerFolded(gConfig) ? kMinFoldedWidth : MinimumOverlayWidth(candidate);
     std::vector<std::wstring> tokens;
     std::wstring error;
     if (!ValidateLaneText(WindowText(GetDlgItem(gSettingsWnd, IDC_LANES)), tokens, error)) {
@@ -2608,7 +2767,7 @@ bool BuildSettingsCandidate(Config& candidate, bool reportErrors) {
     struct Field { int id; int page; const wchar_t* name; int min; int max; int* value; };
     const Field fields[] = {
         {IDC_X, 1, L"X 위치", -32000, 32000, &candidate.x}, {IDC_Y, 1, L"Y 위치", -32000, 32000, &candidate.y},
-        {IDC_WIDTH, 1, L"가로 크기", 240, 10000, &candidate.width}, {IDC_HEIGHT, 1, L"세로 크기", 90, 4000, &candidate.height},
+        {IDC_WIDTH, 1, L"가로 크기", minWidth, 10000, &candidate.width}, {IDC_HEIGHT, 1, L"세로 크기", kMinOverlayHeight, 4000, &candidate.height},
         {IDC_DURATION, 2, L"사라지는 시간", 120, 5000, &candidate.durationMs}, {IDC_TRAVEL, 2, L"이동 거리", 40, 4000, &candidate.travelPx},
         {IDC_NOTE_WIDTH, 2, L"노트 너비", 24, 220, &candidate.noteWidth}, {IDC_NOTE_HEIGHT, 2, L"노트 높이", 18, 140, &candidate.noteHeight},
         {IDC_LANE_SPACING, 2, L"레인 간격", 50, 160, &candidate.laneSpacingPercent},
@@ -2625,24 +2784,31 @@ bool BuildSettingsCandidate(Config& candidate, bool reportErrors) {
         {IDC_TOPMOST, &candidate.alwaysOnTop}, {IDC_CIRCLE_NOTES, &candidate.circleNotes}, {IDC_LANE_BG, &candidate.laneBackground},
         {IDC_ROUNDED_BOXES, &candidate.roundedBoxes}, {IDC_THIN_OUTLINE, &candidate.thinOutline}, {IDC_KEY_TEXT_BOTTOM, &candidate.keyTextBottom},
         {IDC_DIFFICULTY_ENABLED, &candidate.difficultyEnabled}, {IDC_DIFFICULTY_HUD, &candidate.difficultyHud},
+        {IDC_KEY_VIEWER_FOLDED, &candidate.keyViewerFolded},
         {IDC_REPORT_AUTO, &candidate.reportAutoSave}, {IDC_GAME_OVERLAY, &candidate.gameOverlay}};
     for (const auto& check : checks) *check.second = SendMessageW(GetDlgItem(gSettingsWnd, check.first), BM_GETCHECK, 0, 0) == BST_CHECKED;
     candidate.visualPreset = gDraftVisualPreset;
     const int keyChoice = static_cast<int>(SendDlgItemMessageW(gSettingsWnd, IDC_ANALYSIS_KEYS, CB_GETCURSEL, 0, 0));
     candidate.analysisKeyMode = keyChoice == 1 ? -1 : keyChoice >= 2 && keyChoice <= 8 ? keyChoice + 2 : 0;
+    candidate.width = std::max(MinimumOverlayWidth(candidate),candidate.width);
     return true;
 }
 
 bool ReadSettingsControls() {
     Config candidate;
     if (!BuildSettingsCandidate(candidate, true)) return false;
+    Config withoutFoldChange = candidate; withoutFoldChange.keyViewerFolded = gConfig.keyViewerFolded;
+    if (KeyViewerFolded(candidate) || KeyViewerFolded(gConfig)) {
+        withoutFoldChange.width = gConfig.width; withoutFoldChange.height = gConfig.height;
+    }
+    const bool presentationOnly = SameConfig(withoutFoldChange, gConfig);
     const bool resetDifficulty = candidate.lanesText != gConfig.lanesText || candidate.difficultyEnabled != gConfig.difficultyEnabled ||
         candidate.reportAutoSave != gConfig.reportAutoSave || candidate.gameOverlay != gConfig.gameOverlay ||
         candidate.analysisKeyMode != gConfig.analysisKeyMode;
     if (resetDifficulty) FinishSessionReport("분석 / 저장 설정 변경", NowMs());
     gConfig = candidate;
     RebuildLaneConfig();
-    ResetInputRuntimeState();
+    if (!presentationOnly) ResetInputRuntimeState();
     if (resetDifficulty) ResetDifficulty(static_cast<int>(gConfig.lanes.size()));
     RefreshDifficultyDisplay();
     gUnapplied = false;
@@ -2839,11 +3005,9 @@ void SpawnTestNotes() {
 }
 
 void CenterOverlayDraft() {
-    int width = 0, height = 0;
-    if (!ParseInteger(WindowText(GetDlgItem(gSettingsWnd, IDC_WIDTH)), 240, 10000, width) ||
-        !ParseInteger(WindowText(GetDlgItem(gSettingsWnd, IDC_HEIGHT)), 90, 4000, height)) {
-        SetStatus(L"먼저 유효한 가로·세로 크기를 입력해 주세요."); return;
-    }
+    Config draft;
+    if (!BuildSettingsCandidate(draft,true)) return;
+    const int width=draft.width, height=draft.height;
     MONITORINFO info{sizeof(info), {}, {}, 0};
     if (!GetMonitorInfoW(MonitorFromWindow(gSettingsWnd, MONITOR_DEFAULTTONEAREST), &info)) return;
     SetEditInt(gSettingsWnd, IDC_X, info.rcWork.left + (info.rcWork.right - info.rcWork.left - width) / 2);
@@ -2857,6 +3021,12 @@ void ResizeOverlayDraft(double factor) {
     auto scaled = [factor](int value, int minimum, int maximum) {
         return ClampInt(static_cast<int>(std::round(value * factor)), minimum, maximum);
     };
+    if (KeyViewerFolded(draft)) {
+        SetEditInt(gSettingsWnd,IDC_WIDTH,scaled(draft.width,kMinFoldedWidth,10000));
+        SetEditInt(gSettingsWnd,IDC_HEIGHT,scaled(draft.height,kMinOverlayHeight,4000));
+        SetStatus(L"접기 크기를 조절했어요. 최소 250 × 300px이며 글자·노트 설정은 유지됩니다.");
+        return;
+    }
     const int noteWidth = scaled(draft.noteWidth, 24, 220);
     const int noteHeight = scaled(draft.noteHeight, 18, 140);
     const int effectiveHeight = draft.circleNotes ? std::min(noteWidth, std::max(noteHeight, 42)) : noteHeight;
@@ -2866,9 +3036,9 @@ void ResizeOverlayDraft(double factor) {
 #if KEYNOTE_OSU_MEMORY_LINK
     if (gOsuView.enabled) reserved += 28;
 #endif
-    int height = scaled(draft.height, std::max(90, reserved + effectiveHeight + 16), 4000);
+    int height = scaled(draft.height, std::max(kMinOverlayHeight, reserved + effectiveHeight + 16), 4000);
     if (factor < 1.0) height = std::min(height, draft.height);
-    SetEditInt(gSettingsWnd, IDC_WIDTH, scaled(draft.width, 240, 10000));
+    SetEditInt(gSettingsWnd, IDC_WIDTH, scaled(draft.width, kMinOverlayWidth, 10000));
     SetEditInt(gSettingsWnd, IDC_HEIGHT, height);
     SetEditInt(gSettingsWnd, IDC_NOTE_WIDTH, noteWidth);
     SetEditInt(gSettingsWnd, IDC_NOTE_HEIGHT, noteHeight);
@@ -2994,14 +3164,15 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         MakeButton(hwnd, IDC_CENTER, L"이 모니터 중앙으로", 390, 132, 238, 30);
         MakeButton(hwnd, IDC_MOVE_MODE, L"마우스로 위치 이동", 38, 174, 200, 30);
         MakeButton(hwnd, IDC_SAVE_POSITION, L"위치 저장", 248, 174, 160, 30);
-        MakeLabel(hwnd, L"오버레이 크기 (px)", 38, 218, 220, 24);
+        MakeLabel(hwnd, L"최소 650 × 300 · 접기 250 × 300px", 38, 218, 382, 24);
         MakeButton(hwnd, IDC_SIZE_SMALLER, L"10% 축소", 430, 214, 110, 30);
         MakeButton(hwnd, IDC_SIZE_LARGER, L"10% 확대", 552, 214, 110, 30);
-        MakeLabel(hwnd, L"창·노트 함께 조절\n레벨 글자 크기는 유지", 430, 252, 232, 40);
+        MakeLabel(hwnd, L"접기: 창 크기만 조절\n펼치기: 창·노트 함께 조절", 430, 252, 232, 40);
         MakeLabel(hwnd, L"가로", 38, 258, 50, 24); MakeEdit(hwnd, IDC_WIDTH, L"", 96, 254, 110, 26);
         MakeLabel(hwnd, L"세로", 242, 258, 50, 24); MakeEdit(hwnd, IDC_HEIGHT, L"", 300, 254, 110, 26);
         MakeButton(hwnd, IDC_CLICK_THROUGH, L"마우스 클릭을 뒤쪽 창으로 통과", 38, 300, 420, 26, BS_AUTOCHECKBOX);
         MakeButton(hwnd, IDC_TOPMOST, L"항상 위에 표시", 38, 334, 280, 26, BS_AUTOCHECKBOX);
+        MakeButton(hwnd, IDC_KEY_VIEWER_FOLDED, L"키뷰어 접기 · 지표 글자 150%", 348, 334, 314, 26, BS_AUTOCHECKBOX);
         MakeButton(hwnd, IDC_DEBUG_BG, L"위치 확인용 배경 표시", 38, 368, 350, 26, BS_AUTOCHECKBOX);
         MakeLabel(hwnd, L"클릭 통과·항상 위 · 디스코드/OBS로 전환해도 표시 유지 (게임 밖 입력 제외)\nosu!는 창 모드/테두리 없는 전체화면, Qwilight는 창/전체 화면을 사용하세요.", 38, 404, 624, 44);
         MakeLabel(hwnd, L"", 38, 452, 624, 24, IDC_GAME_STATUS);
@@ -3055,7 +3226,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         HWND keyMode = TrackControl(CreateWindowW(WC_COMBOBOXW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
             142, 341, 250, 240, hwnd, reinterpret_cast<HMENU>(IDC_ANALYSIS_KEYS), gInstance, nullptr));
         SendMessageW(keyMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"등록 키 수 (기존)"));
-        SendMessageW(keyMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"자동 추정 · 세션 고정"));
+        SendMessageW(keyMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"자동 추정 · 추가 키 보정"));
         for (int keys = 4; keys <= 10; ++keys) {
             const auto label = std::to_wstring(keys) + L"K 수동 고정";
             SendMessageW(keyMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
@@ -3248,7 +3419,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         case IDC_DEBUG_BG: case IDC_CLICK_THROUGH: case IDC_TOPMOST: case IDC_CIRCLE_NOTES:
         case IDC_LANE_BG: case IDC_ROUNDED_BOXES: case IDC_THIN_OUTLINE: case IDC_KEY_TEXT_BOTTOM:
-        case IDC_DIFFICULTY_ENABLED: case IDC_DIFFICULTY_HUD: case IDC_REPORT_AUTO:
+        case IDC_DIFFICULTY_ENABLED: case IDC_DIFFICULTY_HUD: case IDC_REPORT_AUTO: case IDC_KEY_VIEWER_FOLDED:
             MarkEdited(); return 0;
         case IDC_GAME_OVERLAY:
             if (SendDlgItemMessageW(hwnd, IDC_GAME_OVERLAY, BM_GETCHECK, 0, 0) == BST_CHECKED) {
@@ -3381,6 +3552,18 @@ bool PlaceInitialSettingsWindow() {
         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE;
 }
 
+HWND CreateSettingsWindow() {
+    RECT rect{0, 0, 720, 614};
+    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
+    // A normal app window remains eligible for window-capture pickers. Leave
+    // display affinity at WDA_NONE so screenshots can include settings too.
+    const DWORD extended = WS_EX_APPWINDOW | WS_EX_CONTROLPARENT;
+    AdjustWindowRectEx(&rect, style, FALSE, extended);
+    return CreateWindowExW(extended, L"KeyNoteOverlayCppSettings", L"Key Note Overlay C++ Settings", style,
+        CW_USEDEFAULT, CW_USEDEFAULT, rect.right - rect.left, rect.bottom - rect.top,
+        nullptr, nullptr, gInstance, nullptr);
+}
+
 bool CreateAppWindows(int showCommand) {
     DWORD overlayEx = static_cast<DWORD>(game_overlay::ExtendedStyle(0, gConfig.gameOverlay, gConfig.clickThrough, false));
     if (gConfig.gameOverlay || gConfig.alwaysOnTop) {
@@ -3406,29 +3589,12 @@ bool CreateAppWindows(int showCommand) {
     ApplyOverlayWindowStyle();
     ShowWindow(gOverlayWnd, SW_SHOWNA);
 
-    RECT settingsRect{0, 0, 720, 614};
-    const DWORD settingsStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
-    AdjustWindowRectEx(&settingsRect, settingsStyle, FALSE, WS_EX_TOOLWINDOW | WS_EX_CONTROLPARENT);
-    gSettingsWnd = CreateWindowExW(
-        WS_EX_TOOLWINDOW | WS_EX_CONTROLPARENT,
-        L"KeyNoteOverlayCppSettings",
-        L"Key Note Overlay C++ Settings",
-        settingsStyle,
-        CW_USEDEFAULT,
-        CW_USEDEFAULT,
-        settingsRect.right - settingsRect.left,
-        settingsRect.bottom - settingsRect.top,
-        nullptr,
-        nullptr,
-        gInstance,
-        nullptr
-    );
+    gSettingsWnd = CreateSettingsWindow();
     if (!gSettingsWnd) {
         return false;
     }
     PlaceInitialSettingsWindow();
     gAppRunning = true;
-    SetWindowDisplayAffinity(gSettingsWnd, WDA_EXCLUDEFROMCAPTURE);
     (void)showCommand;
     ShowWindow(gSettingsWnd, SW_SHOWNORMAL);
     UpdateWindow(gSettingsWnd);
@@ -3452,10 +3618,32 @@ int RunUiSelfTest(bool blockFirstReport = false) {
     int failures = 0, checks = 0;
     auto check = [&](const char* name, bool ok) { log << name << "=" << (ok ? "ok" : "FAIL") << "\n"; ++checks; if (!ok) ++failures; };
     if (!RegisterWindows()) return 1;
-    gSettingsWnd = CreateWindowW(L"KeyNoteOverlayCppSettings", L"test", WS_OVERLAPPEDWINDOW,
-        0, 0, 760, 680, nullptr, nullptr, gInstance, nullptr);
+    gSettingsWnd = CreateSettingsWindow();
     if (!gSettingsWnd) return 1;
     check("initial_clean_state", !gUnapplied && !gUnsaved && !IsWindowVisible(gSettingsWnd));
+    const auto settingsEx = GetWindowLongPtrW(gSettingsWnd,GWL_EXSTYLE);
+    DWORD settingsAffinity = 0xffffffff;
+    check("settings_is_normal_capture_selectable_window",(settingsEx & WS_EX_APPWINDOW) && !(settingsEx & WS_EX_TOOLWINDOW) &&
+        !GetWindow(gSettingsWnd,GW_OWNER));
+    check("settings_is_not_excluded_from_capture",GetWindowDisplayAffinity(gSettingsWnd,&settingsAffinity) && settingsAffinity==WDA_NONE);
+    {
+        const auto originalConfig=gConfig;
+        const auto originalJson=gJsonConfigPath,originalIni=gIniConfigPath;
+        gJsonConfigPath=CurrentDirectory()+L"minimum-size-legacy.json";
+        gIniConfigPath=CurrentDirectory()+L"minimum-size-legacy.ini";
+        const std::string oldJson="{\"overlay\":{\"width\":450,\"height\":220,\"x\":123,\"y\":45}}";
+        const std::string oldIni="[overlay]\nwidth=450\nheight=220\nx=123\ny=45\n";
+        check("legacy_small_size_fixtures",WriteTextFile(gJsonConfigPath,oldJson) && WriteTextFile(gIniConfigPath,oldIni));
+        gConfig=Config{};
+        const bool loaded=LoadJsonConfig();ClampAndRebuildConfig();
+        std::string unchanged;
+        check("legacy_json_size_normalized_without_rewrite",loaded && gConfig.width==650 && gConfig.height==300 &&
+            gConfig.x==123 && gConfig.y==45 && ReadTextFile(gJsonConfigPath,unchanged) && unchanged==oldJson);
+        gConfig=Config{};LoadIniConfig();ClampAndRebuildConfig();
+        check("legacy_ini_size_normalized_without_rewrite",gConfig.width==650 && gConfig.height==300 &&
+            gConfig.x==123 && gConfig.y==45 && ReadTextFile(gIniConfigPath,unchanged) && unchanged==oldIni);
+        gConfig=originalConfig;gJsonConfigPath=originalJson;gIniConfigPath=originalIni;RebuildLaneConfig();
+    }
     auto click = [&](int id) { SendMessageW(gSettingsWnd, WM_COMMAND, MAKEWPARAM(id, BN_CLICKED), reinterpret_cast<LPARAM>(GetDlgItem(gSettingsWnd, id))); };
     auto edit = [&](int id, const wchar_t* value) { SetWindowTextW(GetDlgItem(gSettingsWnd, id), value); };
     auto raw = [&]() { return WindowText(GetDlgItem(gSettingsWnd, IDC_LANES)); };
@@ -3643,34 +3831,40 @@ int RunUiSelfTest(bool blockFirstReport = false) {
     gConfig = saved; gSavedConfig = saved; RebuildLaneConfig();
     gUnapplied = gUnsaved = false;
     FillSettingsControls(gSettingsWnd); SaveConfig();
-    edit(IDC_WIDTH, L"800"); edit(IDC_HEIGHT, L"200");
+    edit(IDC_WIDTH, L"800"); edit(IDC_HEIGHT, L"300");
     CenterOverlayDraft();
     MONITORINFO info{sizeof(info), {}, {}, 0};
     bool centerOk = GetMonitorInfoW(MonitorFromWindow(gSettingsWnd, MONITOR_DEFAULTTONEAREST), &info) &&
         WindowText(GetDlgItem(gSettingsWnd, IDC_X)) == std::to_wstring(info.rcWork.left + (info.rcWork.right - info.rcWork.left - 800) / 2) &&
-        WindowText(GetDlgItem(gSettingsWnd, IDC_Y)) == std::to_wstring(info.rcWork.top + (info.rcWork.bottom - info.rcWork.top - 200) / 2);
+        WindowText(GetDlgItem(gSettingsWnd, IDC_Y)) == std::to_wstring(info.rcWork.top + (info.rcWork.bottom - info.rcWork.top - 300) / 2);
     check("center_uses_current_monitor", centerOk && SameConfig(gConfig, saved));
     click(IDC_REVERT);
     {
         const Config beforeSizing = gConfig;
-        edit(IDC_WIDTH, L"900"); edit(IDC_HEIGHT, L"220");
+        edit(IDC_WIDTH, L"900"); edit(IDC_HEIGHT, L"400");
         edit(IDC_NOTE_WIDTH, L"58"); edit(IDC_NOTE_HEIGHT, L"34"); edit(IDC_TRAVEL, L"180");
         edit(IDC_X, L"123"); edit(IDC_LANE_SPACING, L"85");
         click(IDC_SIZE_SMALLER);
         Config smaller;
         check("resize_scales_window_notes_and_travel", BuildSettingsCandidate(smaller, false) &&
-            smaller.width == 810 && smaller.height == 198 && smaller.noteWidth == 52 &&
+            smaller.width == 810 && smaller.height == 360 && smaller.noteWidth == 52 &&
             smaller.noteHeight == 31 && smaller.travelPx == 162);
         check("resize_is_draft_and_preserves_other_fields", SameConfig(gConfig, beforeSizing) && gUnapplied &&
             smaller.x == 123 && smaller.laneSpacingPercent == 85 && smaller.lanesText == beforeSizing.lanesText);
         click(IDC_SIZE_LARGER);
         Config larger;
         check("resize_grows_current_draft", BuildSettingsCandidate(larger, false) && larger.width == 891 &&
-            larger.height == 218 && larger.noteWidth == 57 && larger.noteHeight == 34 && larger.travelPx == 178);
+            larger.height == 396 && larger.noteWidth == 57 && larger.noteHeight == 34 && larger.travelPx == 178);
         for (int i = 0; i < 40; ++i) click(IDC_SIZE_SMALLER);
         check("resize_minimum_keeps_note_below_hud", BuildSettingsCandidate(smaller, false) &&
-            smaller.width == 240 && smaller.noteWidth == 24 && smaller.noteHeight == 18 && smaller.travelPx == 40 &&
-            smaller.height >= 76 + smaller.noteHeight + 16);
+            smaller.width == 650 && smaller.noteWidth == 24 && smaller.noteHeight == 18 && smaller.travelPx == 40 &&
+            smaller.height == 300);
+        edit(IDC_WIDTH,L"649");
+        check("width_below_650_is_rejected", !BuildSettingsCandidate(smaller,false) && SameConfig(gConfig,beforeSizing));
+        edit(IDC_WIDTH,L"650");edit(IDC_HEIGHT,L"299");
+        check("height_below_300_is_rejected", !BuildSettingsCandidate(smaller,false) && SameConfig(gConfig,beforeSizing));
+        edit(IDC_HEIGHT,L"300");
+        check("exact_minimum_dimensions_are_accepted", BuildSettingsCandidate(smaller,false) && smaller.width==650 && smaller.height==300);
         edit(IDC_WIDTH, L"invalid");
         const auto heightBefore = WindowText(GetDlgItem(gSettingsWnd, IDC_HEIGHT));
         click(IDC_SIZE_SMALLER);
@@ -3686,7 +3880,7 @@ int RunUiSelfTest(bool blockFirstReport = false) {
         SendMessageW(gSettingsWnd, WM_HSCROLL, MAKEWPARAM(TB_THUMBTRACK, 65), reinterpret_cast<LPARAM>(slider));
         check("spacing_slider_updates_draft_only", WindowText(GetDlgItem(gSettingsWnd, IDC_LANE_SPACING)) == L"65" &&
             SameConfig(gConfig, beforeSizing) && gUnapplied);
-        edit(IDC_WIDTH, L"900"); edit(IDC_HEIGHT, L"220"); click(IDC_SIZE_SMALLER);
+        edit(IDC_WIDTH, L"900"); edit(IDC_HEIGHT, L"300"); click(IDC_SIZE_SMALLER);
         check("size_and_spacing_save", SaveSettings());
         const Config sized = gConfig;
         gConfig = Config{};
@@ -3731,6 +3925,14 @@ int RunUiSelfTest(bool blockFirstReport = false) {
         WindowText(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_NPS)) == L"NPS  0.0");
     RefreshDifficultyDisplay(15000);
     check("finished_level_stays_when_idle", PreviousPatternValue() == completedText);
+    check("finished_pattern_keeps_auxiliary_axes", !gReviveLive.Current().ready && ShowsCompletedSkills());
+    const auto completedLn = pattern::FormatLnDan(gPatternSummary.Completed());
+    check("compact_ln_row_shows_finished_pattern", !completedLn.empty() &&
+        HudLnValue(450) == L"완료 " + completedLn.substr(3) && HudLnValue(900) == HudLnValue(450));
+    const auto beforePendingInput = gDifficultySnapshot;
+    gDifficultySnapshot.idle = false; // first few keys after a completed session
+    check("pending_input_keeps_completed_axes_visible", ShowsCompletedSkills());
+    gDifficultySnapshot = beforePendingInput;
     RECT liveRect{}, previousRect{}, npsRect{};
     GetWindowRect(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_SCORE), &liveRect);
     GetWindowRect(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_PREVIOUS), &previousRect);
@@ -4535,6 +4737,7 @@ int RunUiSelfTest(bool blockFirstReport = false) {
     SyncOverlayDisplayWidth(foldWindow);
     RECT foldedRect{}; GetClientRect(foldWindow, &foldedRect);
     check("folding_changes_window_not_saved_width", foldWindow && foldedRect.right == folded.width && gConfig.width == configuredWidth);
+    check("folding_respects_minimum_window_size", foldedRect.right>=650 && foldedRect.bottom>=300);
     const bool priorHud = gConfig.difficultyHud, priorBackground = gConfig.debugBackground, priorLanes = gConfig.laneBackground;
     gConfig.difficultyHud = gConfig.debugBackground = gConfig.laneBackground = false;
     Note foldedNote; foldedNote.lane = 6; foldedNote.label = gConfig.lanes[6].label; foldedNote.pressMs = 227900;
@@ -4557,15 +4760,41 @@ int RunUiSelfTest(bool blockFirstReport = false) {
     gConfig.difficultyHud = priorHud; gConfig.debugBackground = priorBackground; gConfig.laneBackground = priorLanes;
     RecordDifficultyInput(9, true, 228100); RecordDifficultyInput(9, false, 228110);
     RefreshDifficultyDisplay(228110);
-    check("extra_lane_clears_cpp_axes",!gReviveLive.Current().ready && gReviveLive.Current().status==L"키 수 확인");
-    check("automatic_late_key_warning_preserves_input", !gDifficultySnapshot.ready && gDifficultySnapshot.keyModeConflict &&
-        DifficultyValue() == L"키 수 확인" && gDifficultySnapshot.currentNps > 0);
+    check("extra_lane_clears_cpp_axes",!gReviveLive.Current().ready && gReviveLive.Current().status==L"키 추정 중");
+    check("automatic_late_key_rechecks_and_preserves_input", !gDifficultySnapshot.ready && !gDifficultySnapshot.keyModeConflict &&
+        gDifficultySnapshot.keyModePending && DifficultyValue() == L"키 보정 중" && gDifficultySnapshot.currentNps > 0);
     SyncOverlayDisplayWidth(foldWindow); GetClientRect(foldWindow, &foldedRect);
     check("extra_key_unfolds_all_lanes", !CurrentLaneDisplay(gConfig.width).compact && foldedRect.right == configuredWidth);
     if (foldWindow) DestroyWindow(foldWindow);
-    RecordDifficultyInput(0, true, 240000); RecordDifficultyInput(0, false, 240010);
-    RefreshDifficultyDisplay(240010);
+    for(int i=0;i<32;++i) {
+        const int lanes[]={0,2,4,6,9};
+        RecordDifficultyInput(lanes[i%5],true,228200+i*100.);
+        RecordDifficultyInput(lanes[i%5],false,228230+i*100.);
+    }
+    RefreshDifficultyDisplay(231400);
+    for(int retry=0;retry<200 && gReviveLive.Busy();++retry) {Sleep(2);RefreshDifficultyDisplay(231400);}
+    check("automatic_late_key_recovers_primary_and_auxiliary",gAnalysisKeys.Keys()==5 &&
+        gDifficultySnapshot.ready && !gDifficultySnapshot.keyModeConflict && !gDifficultySnapshot.keyModePending &&
+        gDifficultySnapshot.profile==pattern::RatingProfile::Aery5 && gReviveLive.Current().ready);
+    RefreshDifficultyDisplay(241330);
+    check("automatic_corrected_mode_can_complete",gPatternSummary.Completed().ready &&
+        gPatternSummary.Completed().analysisKeys==5 && gCompletedSkills.Completed().ready);
+    RecordDifficultyInput(0, true, 242000); RecordDifficultyInput(0, false, 242010);
+    RefreshDifficultyDisplay(242010);
     check("automatic_new_session_restarts_inference", gDifficultySnapshot.keyModePending && !gDifficultySnapshot.keyModeConflict);
+    for(int i=0;i<64;++i) {
+        RecordDifficultyInput((i%4)*2,true,244000+i*125.);
+        RecordDifficultyInput((i%4)*2,false,244010+i*125.);
+    }
+    RefreshDifficultyDisplay(252000);
+    for(int retry=0;retry<200 && gReviveLive.Busy();++retry) {Sleep(2);RefreshDifficultyDisplay(252000);}
+    check("auto_unconfirmed_extra_fixture_has_valid_four_key_result",gAnalysisKeys.Keys()==4 && gDifficultySnapshot.ready && gReviveLive.Current().ready);
+    RecordDifficultyInput(9,true,252100);RecordDifficultyInput(9,false,252110);
+    // Deliberately skip UI refreshes until completion: input must block the old
+    // candidate as soon as an unresolved extra lane is seen.
+    RefreshDifficultyDisplay(262110);
+    check("auto_unconfirmed_extra_key_never_completes_wrong_basis",gDifficultySnapshot.idle &&
+        !gPatternSummary.Completed().ready && !gCompletedSkills.Completed().ready);
     SendDlgItemMessageW(gSettingsWnd, IDC_ANALYSIS_KEYS, CB_SETCURSEL, 0, 0);
     check("registered_key_mode_restores_legacy_basis", ReadSettingsControls() && gConfig.analysisKeyMode == 0 && DifficultyProfileName() == L"Revive 10K");
     const auto beforeAllKeys = gConfig;
@@ -4596,6 +4825,236 @@ int RunUiSelfTest(bool blockFirstReport = false) {
             check("other_keys_six_large_skills_render",renderHud(240,90,name.c_str()));
         }
     }
+    // Reproduce the reported compact-HUD sequence using accepted input only:
+    // play -> ten seconds idle -> a few typed keys -> another full play.
+    gConfig.lanesText=L"D,F,J,K";gConfig.analysisKeyMode=0;gConfig.gameOverlay=false;gConfig.reportAutoSave=false;
+    RebuildLaneConfig();ResetDifficulty(4);ShowSettingsPage(3);
+#if KEYNOTE_OSU_MEMORY_LINK
+    const auto beforeCompletionPreview=gOsuView;gOsuView={};
+#endif
+    for(int i=0;i<32;++i) {
+        RecordDifficultyInput(i%4,true,300000+i*250.);
+        RecordDifficultyInput(i%4,false,300170+i*250.);
+    }
+    RefreshDifficultyDisplay(308000);
+    for(int retry=0;retry<200 && gReviveLive.Busy();++retry) {Sleep(2);RefreshDifficultyDisplay(308000);}
+    const auto lastLiveSkills=gReviveLive.Current();
+    check("completion_fixture_has_six_axes_and_hold",lastLiveSkills.ready && lastLiveSkills.skills[5]>0);
+    RefreshDifficultyDisplay(318000);
+    const auto finishedSkills=gCompletedSkills.Completed();
+    const auto finishedLevel=PreviousPatternValue(),finishedLn=HudLnValue(450);
+    check("completed_input_keeps_all_six_axes",ShowsCompletedSkills() && finishedSkills.skills==lastLiveSkills.skills);
+    check("completed_ln_visible_at_all_widths",!finishedLn.empty() && finishedLn.rfind(L"완료 ",0)==0 &&
+        HudLnValue(240)==finishedLn && HudLnValue(599)==finishedLn && HudLnValue(600)==finishedLn);
+    check("completed_hud_renders_compact_and_wide",renderHud(450,320,L"hud-completed-450.bmp") &&
+        renderHud(240,320,L"hud-completed-240.bmp") && renderHud(900,320,L"hud-completed-900.bmp"));
+    check("completed_hud_renders_at_new_minimum",renderHud(650,300,L"hud-completed-650.bmp"));
+    RecordDifficultyInput(0,true,318100);RecordDifficultyInput(0,false,318130);
+    RefreshDifficultyDisplay(318200);
+    check("short_input_preserves_completed_display",!gDifficultySnapshot.idle && !gDifficultySnapshot.ready &&
+        ShowsCompletedSkills() && gCompletedSkills.Completed().skills==finishedSkills.skills &&
+        PreviousPatternValue()==finishedLevel && HudLnValue(450)==finishedLn);
+    check("pending_input_hud_renders_completed_values",renderHud(450,320,L"hud-completed-pending-450.bmp"));
+    RefreshDifficultyDisplay(328130);
+    check("short_session_does_not_replace_completed_results",ShowsCompletedSkills() &&
+        gCompletedSkills.Completed().skills==finishedSkills.skills && PreviousPatternValue()==finishedLevel);
+    for(int i=0;i<32;++i) {
+        RecordDifficultyInput(i%4,true,330000+i*200.);
+        RecordDifficultyInput(i%4,false,330030+i*200.);
+    }
+    RefreshDifficultyDisplay(336400);
+    for(int retry=0;retry<200 && gReviveLive.Busy();++retry) {Sleep(2);RefreshDifficultyDisplay(336400);}
+    const auto nextLiveSkills=gReviveLive.Current();
+    check("valid_new_input_prefers_live_axes",nextLiveSkills.ready && !ShowsCompletedSkills() && nextLiveSkills.skills[5]==0);
+    RefreshDifficultyDisplay(346230);
+    check("next_completed_play_replaces_old_axes",ShowsCompletedSkills() &&
+        gCompletedSkills.Completed().skills==nextLiveSkills.skills && gCompletedSkills.Completed().skills[5]==0);
+    for(int i=0;i<32;++i) {
+        RecordDifficultyInput(i%4,true,350000+i*200.);
+        RecordDifficultyInput(i%4,false,350030+i*200.);
+    }
+    RefreshDifficultyDisplay(356400);
+    for(int retry=0;retry<200 && gReviveLive.Busy();++retry) {Sleep(2);RefreshDifficultyDisplay(356400);}
+    const auto firstLiveSkills=gReviveLive.Current();
+    for(int i=0;i<32;++i) {
+        RecordDifficultyInput(i%4,true,356500+i*250.);
+        RecordDifficultyInput(i%4,false,356670+i*250.);
+    }
+    RefreshDifficultyDisplay(364500);
+    for(int retry=0;retry<200 && gReviveLive.Busy();++retry) {Sleep(2);RefreshDifficultyDisplay(364500);}
+    const auto updatedLiveSkills=gReviveLive.Current();
+    check("live_axes_keep_updating_while_previous_result_exists",firstLiveSkills.ready && firstLiveSkills.skills[5]==0 &&
+        updatedLiveSkills.ready && !ShowsCompletedSkills() && updatedLiveSkills.skills!=firstLiveSkills.skills &&
+        updatedLiveSkills.skills[5]>0 && gCompletedSkills.Completed().skills==nextLiveSkills.skills);
+    check("updated_live_hud_renders_at_new_minimum",renderHud(650,300,L"hud-live-updated-650.bmp"));
+    // A peak can occur while the previous CPP result is still on screen.
+    // Deliver the new result after the main rating enters its retained state.
+    ResetDifficulty(4);
+    for(int i=0;i<32;++i) {
+        RecordDifficultyInput(i%4,true,380000+i*200.);
+        RecordDifficultyInput(i%4,false,380030+i*200.);
+    }
+    RefreshDifficultyDisplay(386400);
+    for(int retry=0;retry<200 && gReviveLive.Busy();++retry) {Sleep(2);RefreshDifficultyDisplay(386400);}
+    const auto earlyAxes=gReviveLive.Current();
+    const double earlyStrength=gDifficultySnapshot.rating;
+    for(int i=0;i<16;++i) {
+        for(int lane=0;lane<4;++lane)RecordDifficultyInput(lane,true,387000+i*400.);
+        for(int lane=0;lane<4;++lane)RecordDifficultyInput(lane,false,387170+i*400.);
+    }
+    RefreshDifficultyDisplay(393200);
+    const double laterStrength=gDifficultySnapshot.rating;
+    check("completion_regression_queues_stronger_window_with_old_axes",earlyAxes.ready &&
+        laterStrength>earlyStrength && gReviveLive.Busy() && gReviveLive.Current().skills==earlyAxes.skills);
+    for(int retry=0;retry<200 && gReviveLive.Current().skills==earlyAxes.skills;++retry) {Sleep(2);RefreshDifficultyDisplay(394700);}
+    const auto lateAxes=gReviveLive.Current();
+    check("completion_regression_delivers_changed_axes_during_retention",gDifficultySnapshot.retained &&
+        lateAxes.ready && lateAxes.skills!=earlyAxes.skills && lateAxes.skills[5]>0);
+    RefreshDifficultyDisplay(403169);
+    check("completion_waits_until_ten_seconds_after_release",!gDifficultySnapshot.idle && !gCompletedSkills.Completed().ready);
+    RefreshDifficultyDisplay(403170);
+    check("completion_uses_later_peak_axes_instead_of_first_result",ShowsCompletedSkills() &&
+        gCompletedSkills.Completed().skills==lateAxes.skills);
+    const auto beforeViewerFold=gConfig, savedBeforeViewerFold=gSavedConfig;
+    const auto originalViewerWidth=OverlayPresentationWidth();
+    const auto originalViewerHeight=OverlayPresentationHeight(originalViewerWidth);
+    FillSettingsControls(gSettingsWnd);
+    SendDlgItemMessageW(gSettingsWnd,IDC_KEY_VIEWER_FOLDED,BM_SETCHECK,BST_CHECKED,0);
+    click(IDC_KEY_VIEWER_FOLDED);
+    check("viewer_fold_is_opt_in_draft",!Config{}.keyViewerFolded && !gConfig.keyViewerFolded && gUnapplied);
+    RecordDifficultyInput(0,true,403200);
+    check("viewer_fold_apply_keeps_live_hold_and_completed_values",ReadSettingsControls() && KeyViewerFolded() &&
+        gDifficulty.IsHeld(0) && gCompletedSkills.Completed().skills==lateAxes.skills);
+    check("viewer_fold_uses_configured_pixel_width_without_changing_geometry",OverlayPresentationWidth()==gConfig.width &&
+        gConfig.width==beforeViewerFold.width && gConfig.height==beforeViewerFold.height &&
+        gConfig.noteWidth==beforeViewerFold.noteWidth && gConfig.lanesText==beforeViewerFold.lanesText);
+    check("viewer_fold_saves",SaveSettings());
+    const auto foldedConfig=gConfig;
+    gConfig=Config{};
+    check("viewer_fold_json_roundtrip",LoadJsonConfig() && gConfig.keyViewerFolded && gConfig.width==foldedConfig.width);
+    gConfig=Config{};LoadIniConfig();
+    check("viewer_fold_ini_roundtrip",gConfig.keyViewerFolded && gConfig.height==foldedConfig.height);
+    gConfig=foldedConfig;RebuildLaneConfig();
+    RecordDifficultyInput(0,false,403300);
+    gDifficultySnapshot={};gDifficultySnapshot.profile=pattern::RatingProfile::Osu4;
+    gDifficultySnapshot.ready=true;gDifficultySnapshot.idle=false;gDifficultySnapshot.stars=gDifficultySnapshot.rating=4;
+    gDifficultySnapshot.currentNps=32;
+    gConfig.debugBackground=false;gConfig.gameOverlay=false;gMoveMode=false;
+#if KEYNOTE_OSU_MEMORY_LINK
+    const auto foldSelected=gOsuView;gOsuView={};
+#endif
+    for(int pixelWidth : {250,400,650,900,1350}) {
+        gConfig.width=pixelWidth;gConfig.height=300;
+        const int w=OverlayPresentationWidth(), h=OverlayPresentationHeight(w);
+        check("viewer_fold_honors_width_and_has_no_reserved_note_area",w==pixelWidth && h==std::max(300,FoldedHudPixels(FoldedHudHeight(w))));
+        if(pixelWidth==250) check("viewer_fold_exact_250_by_300",w==250 && h==300);
+        overlay::AlphaSurface foldedFrame(w,h), emptyFrame(w,h);
+        Note foldNote;foldNote.lane=0;foldNote.held=true;foldNote.pressMs=404000;foldNote.label=L"D";
+        gNotes={foldNote};gConfig.laneBackground=true;
+        const bool withNotes=RenderOverlay(foldedFrame,404100);
+        gNotes.clear();gConfig.laneBackground=false;
+        const bool withoutNotes=RenderOverlay(emptyFrame,404100);
+        check("viewer_fold_hides_notes_keys_and_lane_background",withNotes && withoutNotes &&
+            std::equal(foldedFrame.pixels,foldedFrame.pixels+w*h,emptyFrame.pixels));
+        BITMAPINFOHEADER info{};info.biSize=sizeof(info);info.biWidth=w;info.biHeight=-h;info.biPlanes=1;info.biBitCount=32;
+        BITMAPFILEHEADER header{};header.bfType=0x4d42;header.bfOffBits=sizeof(header)+sizeof(info);header.bfSize=header.bfOffBits+w*h*4;
+        std::ofstream image(std::filesystem::path(CurrentDirectory()+L"hud-viewer-fold-"+std::to_wstring(pixelWidth)+L".bmp"),std::ios::binary);
+        image.write(reinterpret_cast<const char*>(&header),sizeof(header));image.write(reinterpret_cast<const char*>(&info),sizeof(info));
+        image.write(reinterpret_cast<const char*>(foldedFrame.pixels),w*h*4);image.close();
+        check("viewer_fold_preview_written",!!image);
+        gMoveMode=true;
+        check("viewer_fold_move_hint_has_its_own_space",OverlayPresentationHeight(w)==std::max(300,FoldedHudPixels(FoldedHudHeight(w)+28)));
+        gMoveMode=false;
+        if(pixelWidth==250) {
+            for(int axis=0;axis<6;++axis) {
+                check("viewer_fold_smallest_keeps_full_axis_names_at_enlarged_font",
+                    FitDifficultyFont(foldedFrame.dc,revive_aux::SkillName(axis),FoldedHudWidth(w)-54,gHudSmallFont,22)==gHudSmallFont);
+            }
+            check("viewer_fold_smallest_keeps_three_digit_values_at_enlarged_font",
+                FitDifficultyFont(foldedFrame.dc,L"100",40,gHudSmallFont,22)==gHudSmallFont);
+        }
+    }
+    gConfig=foldedConfig;gConfig.difficultyHud=false;
+    check("viewer_fold_respects_disabled_hud",!KeyViewerFolded() && OverlayPresentationWidth()==originalViewerWidth);
+    gConfig=foldedConfig;gConfig.difficultyEnabled=false;
+    check("viewer_fold_respects_disabled_analysis",!KeyViewerFolded());
+    gConfig=foldedConfig;
+    HWND viewerFoldWindow=CreateWindowW(L"KeyNoteOverlayCppWindow",L"fold test",WS_POPUP,
+        0,0,originalViewerWidth,originalViewerHeight,nullptr,nullptr,gInstance,nullptr);
+    RECT viewerFoldRect{};
+    SyncOverlayDisplayWidth(viewerFoldWindow);GetClientRect(viewerFoldWindow,&viewerFoldRect);
+    check("viewer_fold_resizes_native_surface",viewerFoldWindow && viewerFoldRect.right==OverlayPresentationWidth() &&
+        viewerFoldRect.bottom==OverlayPresentationHeight(viewerFoldRect.right));
+    gConfig.keyViewerFolded=false;SyncOverlayDisplayWidth(viewerFoldWindow);GetClientRect(viewerFoldWindow,&viewerFoldRect);
+    check("viewer_unfold_restores_native_surface",viewerFoldRect.right==originalViewerWidth && viewerFoldRect.bottom==originalViewerHeight);
+    gConfig=foldedConfig;FillSettingsControls(gSettingsWnd);
+    edit(IDC_WIDTH,L"250");edit(IDC_HEIGHT,L"300");
+    Config smallFold;
+    check("viewer_fold_settings_accept_250_by_300",BuildSettingsCandidate(smallFold,false) && smallFold.width==250 && smallFold.height==300);
+    edit(IDC_WIDTH,L"249");
+    check("viewer_fold_rejects_width_below_250",!BuildSettingsCandidate(smallFold,false));
+    edit(IDC_WIDTH,L"250");edit(IDC_HEIGHT,L"299");
+    check("viewer_fold_rejects_height_below_300",!BuildSettingsCandidate(smallFold,false));
+    edit(IDC_HEIGHT,L"300");
+    click(IDC_SIZE_SMALLER);
+    check("viewer_fold_resize_stops_at_250_by_300_and_keeps_notes",BuildSettingsCandidate(smallFold,false) &&
+        smallFold.width==250 && smallFold.height==300 && smallFold.noteWidth==foldedConfig.noteWidth &&
+        smallFold.noteHeight==foldedConfig.noteHeight && smallFold.travelPx==foldedConfig.travelPx);
+    check("viewer_fold_small_size_saves",SaveSettings());
+    gConfig=Config{};
+    check("viewer_fold_small_size_json_roundtrip",LoadJsonConfig() && (ClampAndRebuildConfig(),gConfig.width==250 && gConfig.height==300 && KeyViewerFolded()));
+    gConfig=Config{};LoadIniConfig();
+    check("viewer_fold_small_size_ini_roundtrip",gConfig.width==250 && gConfig.height==300 && KeyViewerFolded());
+    SyncOverlayDisplayWidth(viewerFoldWindow);GetClientRect(viewerFoldWindow,&viewerFoldRect);
+    check("viewer_fold_native_surface_is_250_by_300",viewerFoldRect.right==250 && viewerFoldRect.bottom==300);
+    FillSettingsControls(gSettingsWnd);
+    SendDlgItemMessageW(gSettingsWnd,IDC_KEY_VIEWER_FOLDED,BM_SETCHECK,BST_UNCHECKED,0);
+    check("viewer_unfold_small_size_restores_normal_minimum",ReadSettingsControls() && !KeyViewerFolded() && gConfig.width==650);
+    SyncOverlayDisplayWidth(viewerFoldWindow);GetClientRect(viewerFoldWindow,&viewerFoldRect);
+    check("viewer_unfold_native_surface_keeps_normal_minimum",viewerFoldRect.right>=650 && viewerFoldRect.bottom>=300);
+    if(viewerFoldWindow)DestroyWindow(viewerFoldWindow);
+    gConfig=beforeViewerFold;gSavedConfig=savedBeforeViewerFold;RebuildLaneConfig();FillSettingsControls(gSettingsWnd);
+    check("viewer_unfold_restores_original_geometry",!KeyViewerFolded() && OverlayPresentationWidth()==originalViewerWidth &&
+        OverlayPresentationHeight(originalViewerWidth)==originalViewerHeight);
+#if KEYNOTE_OSU_MEMORY_LINK
+    gOsuView=foldSelected;
+#endif
+    ResetDifficulty(4);
+    RefreshDifficultyDisplay(365000);
+    check("explicit_reset_clears_completed_display",!ShowsCompletedSkills() && !gCompletedSkills.Completed().ready && HudLnValue(650).empty());
+    auto mixedMainInput=[&](double tapMs) {
+        ResetDifficulty(4);
+        struct Input { double time; int lane; bool down; };
+        std::vector<Input> input{{400000,3,true},{400010,3,false},{400100,0,true},{408000,0,false}};
+        for(int i=0;i<96;++i) {
+            const double time=400200+i*80.;
+            input.push_back({time,1+i%3,true});input.push_back({time+tapMs,1+i%3,false});
+        }
+        std::sort(input.begin(),input.end(),[](const auto& a,const auto& b) {
+            if(a.time!=b.time)return a.time<b.time;
+            if(a.down!=b.down)return !a.down;
+            return a.lane<b.lane;
+        });
+        std::size_t next=0;
+        for(double now=400000;now<=408000;now+=100) {
+            while(next<input.size() && input[next].time<=now) {
+                const auto event=input[next++];RecordDifficultyInput(event.lane,event.down,event.time);
+            }
+            RefreshDifficultyDisplay(now);
+        }
+        const auto current=gDifficultySnapshot;
+        RefreshDifficultyDisplay(418000);
+        return std::pair<pattern::Snapshot,pattern::Snapshot>{current,gPatternSummary.Completed()};
+    };
+    const auto fastTaps=mixedMainInput(10),slowTaps=mixedMainInput(120);
+    check("mixed_ln_slow_taps_do_not_inflate_main_or_completed_rating",fastTaps.first.ready && slowTaps.first.ready &&
+        fastTaps.second.ready && slowTaps.second.ready && std::abs(fastTaps.first.stars-slowTaps.first.stars)<1e-10 &&
+        std::abs(fastTaps.second.stars-slowTaps.second.stars)<1e-10);
+    check("mixed_ln_top_and_ln_dan_match_short_tap_baseline",PreviousPatternValue()==FormatDifficultyRating(fastTaps.second) &&
+        pattern::FormatLnDan(gPatternSummary.Completed())==pattern::FormatLnDan(fastTaps.second));
+#if KEYNOTE_OSU_MEMORY_LINK
+    gOsuView=beforeCompletionPreview;
+#endif
     gConfig=beforeAllKeys; RebuildLaneConfig(); ResetDifficulty(static_cast<int>(gConfig.lanes.size()));
     // Remove only the fresh directory owned by this test invocation.
     if (reportRootCreated) {
@@ -4714,8 +5173,7 @@ int RunLifecycleSelfTest(bool realTray, bool nativeMenu = false) {
         gConfigPath = gJsonConfigPath;
         gOverlayWnd = CreateWindowW(L"KeyNoteOverlayCppWindow", L"hidden lifecycle overlay", WS_POPUP,
             0, 0, 900, 220, nullptr, nullptr, gInstance, nullptr);
-        gSettingsWnd = CreateWindowW(L"KeyNoteOverlayCppSettings", L"hidden lifecycle settings", WS_OVERLAPPEDWINDOW,
-            0, 0, 760, 680, nullptr, nullptr, gInstance, nullptr);
+        gSettingsWnd = CreateSettingsWindow();
         gAppRunning = IsWindow(gOverlayWnd) && IsWindow(gSettingsWnd);
         return gAppRunning;
     };

@@ -1,5 +1,6 @@
 #pragma once
 #include "revive_auxiliary.h"
+#include "input_timing.h"
 #include <deque>
 #include <cstdint>
 #include <future>
@@ -8,13 +9,20 @@
 namespace revive_live {
 constexpr double WindowMs = 8000;
 constexpr double RefreshMs = 500;
-constexpr double HoldThresholdMs = 170;
+constexpr double HoldThresholdMs = input_timing::LiveHoldThresholdMs;
 constexpr std::size_t MaxPresses = 4096;
 
 struct Sample {
     chartcalc::Chart chart;
     double durationMs = 0;
     std::wstring status;
+};
+
+// Captured when the immutable input window is queued, never when its result
+// arrives. ready excludes retained/unqualified primary ratings.
+struct RatingContext {
+    bool ready = false;
+    double strength = 0;
 };
 
 // UI-thread input history. Presses held at least HoldThresholdMs become LN
@@ -46,19 +54,38 @@ public:
     void Reset(int lanes);
     void Key(int lane, bool down, double nowMs);
     void ReleaseAll(double nowMs) { window_.ReleaseAll(nowMs); }
-    void Update(double nowMs, bool enabled, int analysisKeys, bool pending, bool conflict, bool limited);
+    void SetAnalysisKeys(int keys);
+    void Update(double nowMs, bool enabled, int analysisKeys, bool pending, bool conflict, bool limited,
+        RatingContext rating = {});
     const revive_aux::Summary& Current() const { return summary_; }
+    const RatingContext& CurrentRating() const { return rating_; }
     bool Busy() const { return job_.valid(); }
     void Stop();
 private:
     void Invalidate(const std::wstring& status);
     Window window_;
     revive_aux::Summary summary_;
+    RatingContext rating_, jobRating_;
     std::future<revive_aux::Summary> job_;
     std::shared_ptr<std::atomic<bool>> cancelled_;
     std::uint64_t generation_ = 0, jobGeneration_ = 0;
     int analysisKeys_ = 0;
     double next_ = 0;
     std::wstring gate_;
+};
+
+// Axes of a session's strongest stretch, kept after the 8-second window
+// expires. Mirrors pattern::PatternSummary: only an idle transition publishes,
+// and an input limit or key conflict withholds the whole session.
+class CompletedSkills {
+public:
+    void Observe(const revive_aux::Summary& live, const RatingContext& sourceRating,
+        bool idle, bool counted, bool blocked);
+    void Reset() { peak_ = completed_ = {}; best_ = 0; blocked_ = counted_ = false; }
+    const revive_aux::Summary& Completed() const { return completed_; }
+private:
+    revive_aux::Summary peak_, completed_;
+    double best_ = 0;
+    bool blocked_ = false, counted_ = false;
 };
 }

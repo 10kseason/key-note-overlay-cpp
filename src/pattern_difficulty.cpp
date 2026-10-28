@@ -80,8 +80,10 @@ double CalibratedRating(double stars, const std::array<CalibrationPoint, N>& cur
     }
 }
 
-DifficultyEstimator::DifficultyEstimator(int lanes, double holdWeight)
-    : holdWeight_(std::isfinite(holdWeight) ? std::clamp(holdWeight, 0.0, 1.0) : DefaultHoldWeight) {
+DifficultyEstimator::DifficultyEstimator(int lanes, double holdWeight, input_timing::HoldTiming holdTiming)
+    : holdWeight_(std::isfinite(holdWeight) ? std::clamp(holdWeight, 0.0, 1.0) : DefaultHoldWeight),
+      holdThresholdMs_(holdTiming == input_timing::HoldTiming::ReferenceReplay ?
+          input_timing::ReferenceHoldThresholdMs : input_timing::LiveHoldThresholdMs) {
     Reset(lanes);
 }
 
@@ -110,7 +112,7 @@ void DifficultyEstimator::KeyDown(int lane, double timeMs) {
     }
     if (startedMs_ < 0.0) startedMs_ = timeMs;
     bool overlap = false;
-    for (double held : heldSince_) if (held >= 0.0 && timeMs - held >= 90.0) overlap = true;
+    for (double held : heldSince_) if (held >= 0.0 && timeMs - held >= holdThresholdMs_) overlap = true;
     heldSince_[static_cast<std::size_t>(lane)] = timeMs;
     lastDownMs_ = lastEventMs_ = timeMs;
     // Four seconds of context warms up the decaying strain before the 8 s rating window.
@@ -164,7 +166,7 @@ Snapshot DifficultyEstimator::Evaluate(double nowMs, bool includeIdleMetrics) co
         chordLanes.set(static_cast<std::size_t>(press.lane));
         double end = press.end < 0.0 ? nowMs : press.end;
         // A tap has a physical release too. Short key dwell must not become an LN.
-        if (end - press.time < 90.0) end = chordStart;
+        if (end - press.time < holdThresholdMs_) end = chordStart;
         ratedNotes.push_back({chordStart - startedMs_, std::max(chordStart, end) - startedMs_, press.lane});
     }
 

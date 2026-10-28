@@ -189,6 +189,73 @@ int main() {
     check("tap_patterns_keep_original_ratings", tapUnchanged);
     check("ln_adjustment_keeps_nps_and_input_statistics", statsUnchanged);
     check("reset_preserves_live_ln_weight", resetKeepsWeight);
+    // Identical note heads must not gain LN strain merely because a physical
+    // tap was released at 120ms instead of 10ms. Exercise current AND completed
+    // ratings, since a transient open-key error could otherwise stick forever.
+    auto mixedInput = [](int keys, int mode, double tapMs, input_timing::HoldTiming timing) {
+        struct Event { double time; int lane; bool down; };
+        std::vector<Event> events;
+        auto note = [&](int lane, double start, double duration) {
+            events.push_back({start,lane,true});events.push_back({start+duration,lane,false});
+        };
+        note(keys-1,0,10);
+        if(mode==1)note(0,100,7900);
+        for(int i=0;i<96;++i) {
+            const int lane=mode==1?1+i%(keys-1):i%keys;
+            note(lane,200+i*80.,mode==2 || (mode==3 && i%4==0)?250:tapMs);
+        }
+        std::sort(events.begin(),events.end(),[](const auto& a,const auto& b) {
+            if(a.time!=b.time)return a.time<b.time;
+            if(a.down!=b.down)return !a.down;
+            return a.lane<b.lane;
+        });
+        DifficultyEstimator estimator(keys,pattern::DefaultHoldWeight,timing);
+        // Reset must retain the caller's timing policy, including calibration.
+        estimator.Reset(keys);
+        pattern::PatternSummary summary;
+        std::size_t next=0;
+        for(double now=0;now<=8000;now+=10) {
+            while(next<events.size() && events[next].time<=now) {
+                const auto e=events[next++];
+                if(e.down) {summary.Observe(estimator.Evaluate(e.time));estimator.KeyDown(e.lane,e.time);}
+                else estimator.KeyUp(e.lane,e.time);
+            }
+            summary.Observe(estimator.Evaluate(now));
+        }
+        const auto current=estimator.Evaluate(8000);
+        summary.Observe(Snapshot{});
+        return std::pair<Snapshot,Snapshot>{current,summary.Completed()};
+    };
+    const auto liveTiming=input_timing::HoldTiming::LiveInput, referenceTiming=input_timing::HoldTiming::ReferenceReplay;
+    for(int keys : {4,5,6,7,8,9,10}) for(int mode : {0,1,3}) {
+        const auto tap=mixedInput(keys,mode,10,liveTiming);
+        for(double dwell : {89.,90.,120.,150.,169.999}) {
+            const auto slow=mixedInput(keys,mode,dwell,liveTiming);
+            check("slow_taps_preserve_live_and_completed_ratings",slow.first.ready && slow.second.ready &&
+                near(tap.first.stars,slow.first.stars) && near(tap.second.stars,slow.second.stars) &&
+                near(tap.first.rating,slow.first.rating) && near(tap.second.rating,slow.second.rating));
+            check("slow_taps_preserve_nps_and_hold_classification",tap.first.samples==slow.first.samples &&
+                tap.first.nps==slow.first.nps && tap.first.currentNps==slow.first.currentNps &&
+                tap.first.holdOverlapPercent==slow.first.holdOverlapPercent);
+            check("slow_taps_do_not_raise_either_four_key_dan",keys!=4 ||
+                (pattern::FormatDan(pattern::RatingProfile::Osu4,pattern::EstimateDan(tap.second))==
+                 pattern::FormatDan(pattern::RatingProfile::Osu4,pattern::EstimateDan(slow.second)) &&
+                 pattern::FormatLnDan(tap.second)==pattern::FormatLnDan(slow.second)));
+        }
+    }
+    const auto fixedMixed=mixedInput(4,1,120,liveTiming), oldMixed=mixedInput(4,1,120,referenceTiming);
+    check("reference_replay_preserves_published_90ms_scale",std::abs(oldMixed.first.stars-4.24619573117)<1e-9 &&
+        std::abs(fixedMixed.first.stars-2.86926782096)<1e-9 && fixedMixed.first.stars<oldMixed.first.stars);
+    const auto belowHold=mixedInput(4,0,169.999,liveTiming), atHold=mixedInput(4,0,170,liveTiming);
+    check("primary_170ms_hold_boundary",atHold.first.stars>belowHold.first.stars && atHold.second.stars>belowHold.second.stars);
+    for(int keys : {4,5,7,8,10}) {
+        const auto liveLong=mixedInput(keys,2,250,liveTiming), originalLong=mixedInput(keys,2,250,referenceTiming);
+        // Once every remaining key has passed both thresholds, the unchanged
+        // strain formula gives the same result. A historical peak may differ
+        // because open keys qualify later under physical-input inference.
+        check("qualified_long_notes_keep_settled_strain_and_rating",near(liveLong.first.stars,originalLong.first.stars) &&
+            near(liveLong.first.rating,originalLong.first.rating));
+    }
     std::vector<pattern::TimedNote> sequence;
     for (int i = 0; i < 100; ++i) sequence.push_back({i * 125.0,i * 125.0,i % 4});
     const double original = pattern::ManiaStars(sequence, 4);
@@ -459,9 +526,24 @@ int main() {
     for (int i = 0; i < 20; ++i) { selector.Key(0, true, 8100 + i*125.); selector.Key(0, false, 8110 + i*125.); }
     check("auto_keys_never_shrink_in_session", selector.Keys() == 4);
     selector.Key(9, true, 11000); selector.Key(9, false, 11010);
-    check("auto_late_extra_key_is_conflict", selector.Conflict() && selector.Keys() == 4);
+    check("auto_late_extra_key_rechecks_without_permanent_conflict", selector.Pending() && !selector.Conflict() && selector.Keys() == 4);
     check("folding_reverts_on_extra_key", !overlay::MakeLaneDisplay(10,900,100,selector,true).compact);
-    selector.Key(0, true, 21010);
+    auto lateKeyCorrection=selector;
+    lateKeyCorrection.Key(9,true,12000);lateKeyCorrection.Key(9,false,12010);lateKeyCorrection.Update(14000);
+    check("auto_recovers_after_late_key_is_confirmed",!lateKeyCorrection.Pending() && !lateKeyCorrection.Conflict() && lateKeyCorrection.Keys()==5);
+    lateKeyCorrection.Key(1,true,14100);lateKeyCorrection.Key(1,false,14110);
+    lateKeyCorrection.Key(3,true,14200);lateKeyCorrection.Key(3,false,14210);
+    lateKeyCorrection.Update(17200);
+    check("auto_correction_waits_for_each_new_lane_twice",lateKeyCorrection.Pending() && lateKeyCorrection.Keys()==5);
+    lateKeyCorrection.Key(1,true,17300);lateKeyCorrection.Key(1,false,17310);
+    lateKeyCorrection.Key(3,true,17400);lateKeyCorrection.Key(3,false,17410);
+    check("auto_can_correct_again_to_seven_keys",!lateKeyCorrection.Pending() && lateKeyCorrection.Keys()==7);
+    selector.Reset(18,-1);
+    for(int i=0;i<66;++i) {selector.Key(i%11,true,i*125.);selector.Key(i%11,false,i*125.+10);}
+    selector.Update(9000);
+    check("auto_more_than_ten_keys_remains_explicitly_unsupported",selector.Pending() && selector.Conflict());
+    selector=lateKeyCorrection;
+    selector.Key(0, true, 27410);
     check("auto_new_session_relearns_after_ten_seconds", selector.Pending() && !selector.Conflict() && selector.Observed() == 1);
     check("new_session_unfolds_while_observing", overlay::MakeLaneDisplay(10,900,100,selector,true).visible==10);
     selector.Key(0, true, 31010); selector.Update(31010);
