@@ -96,7 +96,9 @@ Analysis Analyze(Chart chart, double holdWeight, const std::atomic<bool>* cancel
         if (a.down != b.down) return !a.down;
         return a.lane < b.lane;
     });
-    pattern::DifficultyEstimator estimator(result.chart.keys, holdWeight);
+    // File tails are known. Keep the timing used to build the published course
+    // references; the stricter live boundary only filters physical tap dwell.
+    pattern::DifficultyEstimator estimator(result.chart.keys, holdWeight, input_timing::HoldTiming::ReferenceReplay);
     pattern::LiveContinuity continuity;
     pattern::PatternSummary peak;
     auto evaluate = [&](double time) {
@@ -150,7 +152,7 @@ std::string RenderReport(const Analysis& a) {
         << "<h1>채보 난이도 분석</h1><section><h2>" << Escape(a.chart.title) << "</h2><p>" << Escape(a.chart.artist) << " · " << Escape(a.chart.variant) << "</p>"
         << "<p>" << a.chart.keys << "K · " << Escape(Basis(a.chart.keys)) << "</p><h2>" << Escape(DifficultyLabel(a.summary)) << "</h2>"
         << "<p>실시간 방식의 최고 구간 · " << a.chart.notes.size() << " 노트 · " << N(a.durationMs / 1000) << "초 · 평균 NPS " << N(a.averageNps) << " · 최대 1초 NPS " << N(a.maximumNps,0) << "</p>"
-        << "<p class='muted'>최근 최대 8초 창을 0.1초마다, 각 누름 직전과 파일 끝에도 분석합니다. 그래프는 0.1초 표본입니다. 전체 곡 공식 등급이나 단위 합격 예측이 아닙니다. LN 추가 부담 " << (a.holdWeight == 1 ? "1 (기준 채보 측정)" : "2/3 (오버레이와 동일)") << ".</p></section>";
+        << "<p class='muted'>최근 최대 8초 창을 0.1초마다, 각 누름 직전과 파일 끝에도 분석합니다. 그래프는 0.1초 표본입니다. 전체 곡 공식 등급이나 단위 합격 예측이 아닙니다. LN 추가 부담 " << (a.holdWeight == 1 ? "1 (기준 채보 측정)" : "2/3 (오버레이와 동일)") << ". 파일 재생은 기존 90ms 기준을 유지하며, 실타건의 170ms LN 추정과 구분합니다.</p></section>";
     if (a.limited) out << "<p>일부 구간이 분석 버퍼를 초과해 요약 난이도를 보류했습니다.</p>";
     const auto ln = pattern::FormatLnDan(a.summary);
     if (!ln.empty() && a.holdWeight == pattern::DefaultHoldWeight)

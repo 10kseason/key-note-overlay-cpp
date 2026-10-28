@@ -2,9 +2,9 @@
 
 Windows rhythm-game key overlay for OBS, osu!, and Qwilight. It captures configured keyboard lanes with a low-level Win32 keyboard hook and renders notes in a straight lane layout. Unregistered keys are ignored before rendering.
 
-**v2.16.1 핫픽스 (2026-10-28):** 오버레이 크기는 **최소 650×300px**입니다. 직접 입력·10% 축소·이전 설정 불러오기·레인 접기에 같은 제한을 적용합니다. 보조지표는 v2.16처럼 **최근 8초 입력을 0.5초마다 계속 갱신**하며, 마지막 입력 후 10초가 지나면 여섯 완료값과 4K LN 결과를 유지합니다. 새 유효 보조값이 준비되면 실시간 표시가 우선합니다. 일반판과 NoOsuMemory를 별도로 제공합니다. [변경·검증](docs/release-v2.16.1.md) · [완료값 동작](docs/completed-results-hotfix.md)
+**v2.16.2 핫픽스 (2026-10-28):** 상단 단수와 4K LN에서 **170ms 미만 단타가 LN으로 잘못 계산되던 문제**를 수정했습니다. 실타건 홀드 추정 기준을 보조지표와 같은 170ms로 통일하며, 파일 분석과 기존 기준표의 계산은 유지합니다. 오버레이 **최소 650×300px**, 보조지표의 **최근 8초 / 0.5초 갱신**, 마지막 입력 10초 뒤 완료값 보존은 그대로입니다. 일반판과 NoOsuMemory를 별도로 제공합니다. [혼합 입력 수정·검증](docs/release-v2.16.2.md) · [크기 제한](docs/release-v2.16.1.md) · [완료값 동작](docs/completed-results-hotfix.md)
 
-[일반판 ZIP](https://github.com/10kseason/key-note-overlay-cpp/releases/download/v2.16.1/KeyNoteOverlayCpp-v2.16.1-Windows-x64.zip) · [NoOsuMemory ZIP](https://github.com/10kseason/key-note-overlay-cpp/releases/download/v2.16.1/KeyNoteOverlayCpp-v2.16.1-NoOsuMemory-Windows-x64.zip)
+[일반판 ZIP](https://github.com/10kseason/key-note-overlay-cpp/releases/download/v2.16.2/KeyNoteOverlayCpp-v2.16.2-Windows-x64.zip) · [NoOsuMemory ZIP](https://github.com/10kseason/key-note-overlay-cpp/releases/download/v2.16.2/KeyNoteOverlayCpp-v2.16.2-NoOsuMemory-Windows-x64.zip)
 
 일반판의 osu! 선곡 연동은 매 실행 OFF이며 직접 동의해야 켜집니다. NoOsuMemory는 게임 메모리 리더와 연동 UI를 컴파일에서 제외합니다. 4~10K 프리셋 외 1~3K·11~18K는 키를 직접 등록하고 `등록 키 수 (기존)`을 사용하세요. 원본 4K LN Dan Courses v2 1~15단의 보조 비교는 일반 Reform과 구분합니다. [스킬 범위](docs/revive-cpp-auxiliary.md) · [4K LN 기준](docs/ln4-reference.md)
 
@@ -52,7 +52,7 @@ Download the portable Windows x64 ZIP from [Releases](https://github.com/10kseas
 
 ## Build
 
-별도 파일 분석 앱 **ChartDifficultyCalculator**의 소스도 저장소에 있습니다. v2.16.1 배포 자산은 오버레이 일반판과 NoOsuMemory만 제공합니다. `.osu` 또는 지원되는 BMS를 직접 골라 구간 그래프와 난이도 요약을 확인하며 게임 메모리를 읽지 않습니다. [계산기 소스·지원 범위·빌드 안내](https://github.com/10kseason/key-note-overlay-cpp/tree/main/difficulty-calculator)를 참고하세요.
+별도 파일 분석 앱 **ChartDifficultyCalculator**의 소스도 저장소에 있습니다. v2.16.2 배포 자산은 오버레이 일반판과 NoOsuMemory만 제공합니다. `.osu` 또는 지원되는 BMS를 직접 골라 구간 그래프와 난이도 요약을 확인하며 게임 메모리를 읽지 않습니다. [계산기 소스·지원 범위·빌드 안내](https://github.com/10kseason/key-note-overlay-cpp/tree/main/difficulty-calculator)를 참고하세요.
 
 Requirements:
 

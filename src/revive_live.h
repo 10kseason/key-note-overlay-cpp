@@ -1,5 +1,6 @@
 #pragma once
 #include "revive_auxiliary.h"
+#include "input_timing.h"
 #include <deque>
 #include <cstdint>
 #include <future>
@@ -8,7 +9,7 @@
 namespace revive_live {
 constexpr double WindowMs = 8000;
 constexpr double RefreshMs = 500;
-constexpr double HoldThresholdMs = 170;
+constexpr double HoldThresholdMs = input_timing::LiveHoldThresholdMs;
 constexpr std::size_t MaxPresses = 4096;
 
 struct Sample {

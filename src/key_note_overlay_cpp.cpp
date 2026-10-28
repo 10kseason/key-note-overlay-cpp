@@ -4724,6 +4724,36 @@ int RunUiSelfTest(bool blockFirstReport = false) {
     ResetDifficulty(4);
     RefreshDifficultyDisplay(365000);
     check("explicit_reset_clears_completed_display",!ShowsCompletedSkills() && !gCompletedSkills.Completed().ready && HudLnValue(650).empty());
+    auto mixedMainInput=[&](double tapMs) {
+        ResetDifficulty(4);
+        struct Input { double time; int lane; bool down; };
+        std::vector<Input> input{{400000,3,true},{400010,3,false},{400100,0,true},{408000,0,false}};
+        for(int i=0;i<96;++i) {
+            const double time=400200+i*80.;
+            input.push_back({time,1+i%3,true});input.push_back({time+tapMs,1+i%3,false});
+        }
+        std::sort(input.begin(),input.end(),[](const auto& a,const auto& b) {
+            if(a.time!=b.time)return a.time<b.time;
+            if(a.down!=b.down)return !a.down;
+            return a.lane<b.lane;
+        });
+        std::size_t next=0;
+        for(double now=400000;now<=408000;now+=100) {
+            while(next<input.size() && input[next].time<=now) {
+                const auto event=input[next++];RecordDifficultyInput(event.lane,event.down,event.time);
+            }
+            RefreshDifficultyDisplay(now);
+        }
+        const auto current=gDifficultySnapshot;
+        RefreshDifficultyDisplay(418000);
+        return std::pair<pattern::Snapshot,pattern::Snapshot>{current,gPatternSummary.Completed()};
+    };
+    const auto fastTaps=mixedMainInput(10),slowTaps=mixedMainInput(120);
+    check("mixed_ln_slow_taps_do_not_inflate_main_or_completed_rating",fastTaps.first.ready && slowTaps.first.ready &&
+        fastTaps.second.ready && slowTaps.second.ready && std::abs(fastTaps.first.stars-slowTaps.first.stars)<1e-10 &&
+        std::abs(fastTaps.second.stars-slowTaps.second.stars)<1e-10);
+    check("mixed_ln_top_and_ln_dan_match_short_tap_baseline",PreviousPatternValue()==FormatDifficultyRating(fastTaps.second) &&
+        pattern::FormatLnDan(gPatternSummary.Completed())==pattern::FormatLnDan(fastTaps.second));
 #if KEYNOTE_OSU_MEMORY_LINK
     gOsuView=beforeCompletionPreview;
 #endif

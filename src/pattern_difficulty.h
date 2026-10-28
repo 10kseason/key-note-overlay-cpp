@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <deque>
 #include "mania_strain.h"
+#include "input_timing.h"
 
 namespace pattern {
 
@@ -76,7 +77,8 @@ public:
     static constexpr double IdleMs = 3000.0;
     static constexpr std::size_t MaxEvents = 4096;
 
-    explicit DifficultyEstimator(int lanes = 8, double holdWeight = DefaultHoldWeight);
+    explicit DifficultyEstimator(int lanes = 8, double holdWeight = DefaultHoldWeight,
+        input_timing::HoldTiming holdTiming = input_timing::HoldTiming::LiveInput);
     void Reset(int lanes);
     // Select a comparison basis without changing or discarding physical lanes.
     void SetAnalysisKeys(int keys) { analysisKeys_ = keys >= 4 && keys <= 10 ? keys : 0; }
@@ -94,6 +96,7 @@ private:
     int lanes_ = 8;
     int analysisKeys_ = 0;
     double holdWeight_ = DefaultHoldWeight;
+    double holdThresholdMs_ = input_timing::LiveHoldThresholdMs;
     double startedMs_ = -1.0;
     double lastDownMs_ = -1.0;
     double lastEventMs_ = -1.0;
