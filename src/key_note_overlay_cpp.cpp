@@ -61,6 +61,7 @@ constexpr UINT ID_TRAY_MOVE = 40003;
 constexpr UINT TRAY_ICON_ID = 1;
 constexpr COLORREF kTransparentKey = RGB(1, 2, 3);
 constexpr int kMinOverlayWidth = 650;
+constexpr int kMinFoldedWidth = 250;
 constexpr int kMinOverlayHeight = 300;
 
 constexpr int IDC_LANES = 1001;
@@ -145,9 +146,6 @@ constexpr int IDC_KEY_VIEWER_FOLDED = 1081;
 constexpr double kHoldThresholdMs = 90.0;
 constexpr double kChordAlignWindowMs = 15.0;
 constexpr double kPulseMs = 95.0;
-#ifndef WDA_EXCLUDEFROMCAPTURE
-constexpr DWORD WDA_EXCLUDEFROMCAPTURE = 0x00000011;
-#endif
 
 struct Lane {
     UINT vk = 0;
@@ -489,12 +487,16 @@ overlay::LaneDisplay CurrentLaneDisplay(int fullWidth) {
     return display;
 }
 
-bool KeyViewerFolded() { return gConfig.keyViewerFolded && gConfig.difficultyEnabled && gConfig.difficultyHud; }
+bool KeyViewerFolded(const Config& config) { return config.keyViewerFolded && config.difficultyEnabled && config.difficultyHud; }
+bool KeyViewerFolded() { return KeyViewerFolded(gConfig); }
+int MinimumOverlayWidth(const Config& config) { return KeyViewerFolded(config) ? kMinFoldedWidth : kMinOverlayWidth; }
 int FoldedHudPixels(int logical) { return (logical * 3 + 1) / 2; }
 int FoldedHudWidth(int pixels) { return pixels * 2 / 3; }
+bool CompactFoldedHud(int width) { return width < 900; }
 int OverlayPresentationWidth() {
-    const int width = CurrentLaneDisplay(gConfig.width).width;
-    return KeyViewerFolded() ? FoldedHudPixels(width) : width;
+    // Folded dimensions are physical pixels, independent of registered lanes
+    // and the 150% font transform, so an entered width of 250 really is 250.
+    return KeyViewerFolded() ? std::max(kMinFoldedWidth, gConfig.width) : CurrentLaneDisplay(gConfig.width).width;
 }
 
 void SyncOverlayDisplayWidth(HWND hwnd) {
@@ -1138,7 +1140,7 @@ bool ReadIniBool(const wchar_t* section, const wchar_t* key, bool fallback) {
 
 void ClampAndRebuildConfig() {
     gConfig.visualPreset = NormalizeVisualPreset(gConfig.visualPreset);
-    gConfig.width = std::max(kMinOverlayWidth, gConfig.width);
+    gConfig.width = std::max(MinimumOverlayWidth(gConfig), gConfig.width);
     gConfig.height = std::max(kMinOverlayHeight, gConfig.height);
     gConfig.durationMs = std::max(120, gConfig.durationMs);
     gConfig.travelPx = std::max(40, gConfig.travelPx);
@@ -1768,8 +1770,17 @@ revive_hud::Layout CurrentHudLayout(int width) {
 }
 
 int DifficultyHeaderHeight(int width, int /*height*/) { return CurrentHudLayout(width).total; }
+int FoldedHudHeight(int width) {
+    if (!CompactFoldedHud(width)) return CurrentHudLayout(FoldedHudWidth(width)).total;
+    // 68 logical pixels for current/completed/NPS/LN + six 22px rows = 300px.
+    int height = 200;
+#if KEYNOTE_OSU_MEMORY_LINK
+    if (gOsuView.enabled) height += 18 + 132 + (gOsuView.ready && gOsuView.keys == 4 ? 16 : 0);
+#endif
+    return height;
+}
 int OverlayPresentationHeight(int width) {
-    if (KeyViewerFolded()) return FoldedHudPixels(CurrentHudLayout(FoldedHudWidth(width)).total + (gMoveMode ? 28 : 0));
+    if (KeyViewerFolded()) return std::max(gConfig.height, FoldedHudPixels(FoldedHudHeight(width) + (gMoveMode ? 28 : 0)));
     return revive_hud::PresentationHeight(gConfig.height, gConfig.noteHeight, CurrentHudLayout(width));
 }
 
@@ -1836,6 +1847,65 @@ std::wstring HudLnValue(int width) {
 // The live meter remains independent and takes over once it has valid axes.
 bool ShowsCompletedSkills() {
     return !gReviveLive.Current().ready && gCompletedSkills.Completed().ready;
+}
+
+void DrawCompactFoldedHud(HDC dc, int width) {
+    EnsureHudFonts();
+    const auto oldFont = SelectObject(dc, gHudSmallFont);
+    SetBkMode(dc, TRANSPARENT);
+    auto panel = [&](int top, int bottom) {
+        RECT rect{4, top, width - 4, bottom};
+        HBRUSH brush = CreateSolidBrush(RGB(10,16,26));
+        FillRect(dc, &rect, brush); DeleteObject(brush);
+    };
+    auto text = [&](const std::wstring& value, RECT rect, HFONT font, COLORREF color, UINT alignment) {
+        SetTextColor(dc,color);
+        SelectObject(dc,FitDifficultyFont(dc,value,rect.right-rect.left,font,rect.bottom-rect.top));
+        DrawTextW(dc,value.c_str(),-1,&rect,DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX|alignment);
+    };
+    const bool completed = ShowsCompletedSkills();
+    for (int i=0;i<2;++i) {
+        const int top=i*26;
+        panel(top,top+26);
+        text(i==0?L"실시간":L"완료",{6,top,52,top+(i==0?13:26)},gHudLabelFont,RGB(209,221,235),DT_LEFT);
+        if(i==0) text(completed?L"보조 완료":gReviveLive.Current().ready?L"보조 측정":L"보조 대기",
+            {6,13,58,26},gHudLabelFont,RGB(184,207,255),DT_LEFT);
+        text(i==0?DifficultyValue():PreviousPatternValue(),{60,top,width-6,top+26},gHudCompactFont,
+            i==0?RGB(112,229,255):RGB(169,245,180),DT_RIGHT);
+    }
+    panel(52,68);
+    std::wostringstream nps; nps<<L"NPS "<<std::fixed<<std::setprecision(1)<<gDifficultySnapshot.currentNps;
+    const bool ln=gDifficultySnapshot.profile==pattern::RatingProfile::Osu4;
+    text(nps.str(),{6,52,ln?74:width-6,68},gHudLabelFont,RGB(255,222,138),DT_LEFT);
+    if(ln) {
+        const auto value=HudLnValue(width);
+        text(value.empty()?L"LN 측정 대기":value,{76,52,width-6,68},gHudLabelFont,RGB(220,195,255),DT_RIGHT);
+    }
+    auto skills = [&](int top, const revive_aux::Summary& summary) {
+        for(int i=0;i<6;++i) {
+            const int y=top+i*22;
+            panel(y,y+22);
+            const COLORREF color=revive_aux::SkillAvailable(summary,i)?RGB(169,245,180):RGB(151,161,176);
+            text(revive_aux::SkillName(i),{6,y,width-48,y+22},gHudSmallFont,color,DT_LEFT);
+            text(revive_aux::SkillValue(summary,i),{width-46,y,width-6,y+22},gHudSmallFont,color,DT_RIGHT);
+        }
+    };
+    skills(68,completed?gCompletedSkills.Completed():gReviveLive.Current());
+#if KEYNOTE_OSU_MEMORY_LINK
+    if(gOsuView.enabled) {
+        panel(200,218);
+        const auto title=gOsuView.ready?L"osu! "+std::to_wstring(gOsuView.keys)+L"K "+gOsuView.difficulty:L"osu! · "+gOsuView.status;
+        text(title,{6,200,width-6,218},gHudLabelFont,RGB(184,207,255),DT_LEFT|DT_END_ELLIPSIS);
+        int top=218;
+        if(gOsuView.ready && gOsuView.keys==4) {
+            panel(top,top+16);
+            text(gOsuView.lnDifficulty,{6,top,width-6,top+16},gHudLabelFont,RGB(220,195,255),DT_LEFT);
+            top+=16;
+        }
+        skills(top,gOsuView.ready?gOsuView.revive:revive_aux::Summary{});
+    }
+#endif
+    SelectObject(dc,oldFont);
 }
 
 void DrawDifficultyHud(HDC dc, int width, int headerHeight) {
@@ -2145,18 +2215,20 @@ bool RenderOverlay(overlay::AlphaSurface& frame, double now) {
         // Scale vector text and its layout together, including fallback fonts,
         // captions, selected-chart rows and NPS. No bitmap stretching is used.
         const int logicalWidth = FoldedHudWidth(width);
-        const int header = CurrentHudLayout(logicalWidth).total;
+        const int header = FoldedHudHeight(width);
         const int saved = SaveDC(mem);
         const XFORM scale{1.5f,0,0,1.5f,0,0};
         if (!saved || !SetGraphicsMode(mem, GM_ADVANCED) || !SetWorldTransform(mem, &scale)) {
             if (saved) RestoreDC(mem,saved);
             return false;
         }
-        DrawDifficultyHud(mem,logicalWidth,header);
+        if (CompactFoldedHud(width)) DrawCompactFoldedHud(mem,logicalWidth);
+        else DrawDifficultyHud(mem,logicalWidth,header);
         if (gMoveMode) {
             RECT hint{4,header,logicalWidth-4,header+28};
             SelectObject(mem,gGuiFont); SetBkMode(mem,TRANSPARENT); SetTextColor(mem,RGB(112,229,255));
-            DrawTextW(mem,L"이동 모드 · 놓으면 위치 저장",-1,&hint,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+            const auto hintText=CompactFoldedHud(width)?L"이동 · 놓으면 저장":L"이동 모드 · 놓으면 위치 저장";
+            DrawTextW(mem,hintText,-1,&hint,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
         }
         RestoreDC(mem,saved);
         frame.FinishGdi();
@@ -2656,6 +2728,11 @@ void SettingsError(int id, int page, const std::wstring& error) {
 bool BuildSettingsCandidate(Config& candidate, bool reportErrors) {
     // Validate the entire draft before touching the active configuration or key map.
     candidate = gConfig;
+    candidate.keyViewerFolded = SendDlgItemMessageW(gSettingsWnd,IDC_KEY_VIEWER_FOLDED,BM_GETCHECK,0,0)==BST_CHECKED;
+    candidate.difficultyEnabled = SendDlgItemMessageW(gSettingsWnd,IDC_DIFFICULTY_ENABLED,BM_GETCHECK,0,0)==BST_CHECKED;
+    candidate.difficultyHud = SendDlgItemMessageW(gSettingsWnd,IDC_DIFFICULTY_HUD,BM_GETCHECK,0,0)==BST_CHECKED;
+    // Turning folding/HUD off restores the normal minimum in the same apply.
+    const int minWidth = KeyViewerFolded(gConfig) ? kMinFoldedWidth : MinimumOverlayWidth(candidate);
     std::vector<std::wstring> tokens;
     std::wstring error;
     if (!ValidateLaneText(WindowText(GetDlgItem(gSettingsWnd, IDC_LANES)), tokens, error)) {
@@ -2690,7 +2767,7 @@ bool BuildSettingsCandidate(Config& candidate, bool reportErrors) {
     struct Field { int id; int page; const wchar_t* name; int min; int max; int* value; };
     const Field fields[] = {
         {IDC_X, 1, L"X 위치", -32000, 32000, &candidate.x}, {IDC_Y, 1, L"Y 위치", -32000, 32000, &candidate.y},
-        {IDC_WIDTH, 1, L"가로 크기", kMinOverlayWidth, 10000, &candidate.width}, {IDC_HEIGHT, 1, L"세로 크기", kMinOverlayHeight, 4000, &candidate.height},
+        {IDC_WIDTH, 1, L"가로 크기", minWidth, 10000, &candidate.width}, {IDC_HEIGHT, 1, L"세로 크기", kMinOverlayHeight, 4000, &candidate.height},
         {IDC_DURATION, 2, L"사라지는 시간", 120, 5000, &candidate.durationMs}, {IDC_TRAVEL, 2, L"이동 거리", 40, 4000, &candidate.travelPx},
         {IDC_NOTE_WIDTH, 2, L"노트 너비", 24, 220, &candidate.noteWidth}, {IDC_NOTE_HEIGHT, 2, L"노트 높이", 18, 140, &candidate.noteHeight},
         {IDC_LANE_SPACING, 2, L"레인 간격", 50, 160, &candidate.laneSpacingPercent},
@@ -2713,6 +2790,7 @@ bool BuildSettingsCandidate(Config& candidate, bool reportErrors) {
     candidate.visualPreset = gDraftVisualPreset;
     const int keyChoice = static_cast<int>(SendDlgItemMessageW(gSettingsWnd, IDC_ANALYSIS_KEYS, CB_GETCURSEL, 0, 0));
     candidate.analysisKeyMode = keyChoice == 1 ? -1 : keyChoice >= 2 && keyChoice <= 8 ? keyChoice + 2 : 0;
+    candidate.width = std::max(MinimumOverlayWidth(candidate),candidate.width);
     return true;
 }
 
@@ -2720,6 +2798,9 @@ bool ReadSettingsControls() {
     Config candidate;
     if (!BuildSettingsCandidate(candidate, true)) return false;
     Config withoutFoldChange = candidate; withoutFoldChange.keyViewerFolded = gConfig.keyViewerFolded;
+    if (KeyViewerFolded(candidate) || KeyViewerFolded(gConfig)) {
+        withoutFoldChange.width = gConfig.width; withoutFoldChange.height = gConfig.height;
+    }
     const bool presentationOnly = SameConfig(withoutFoldChange, gConfig);
     const bool resetDifficulty = candidate.lanesText != gConfig.lanesText || candidate.difficultyEnabled != gConfig.difficultyEnabled ||
         candidate.reportAutoSave != gConfig.reportAutoSave || candidate.gameOverlay != gConfig.gameOverlay ||
@@ -2924,11 +3005,9 @@ void SpawnTestNotes() {
 }
 
 void CenterOverlayDraft() {
-    int width = 0, height = 0;
-    if (!ParseInteger(WindowText(GetDlgItem(gSettingsWnd, IDC_WIDTH)), kMinOverlayWidth, 10000, width) ||
-        !ParseInteger(WindowText(GetDlgItem(gSettingsWnd, IDC_HEIGHT)), kMinOverlayHeight, 4000, height)) {
-        SetStatus(L"먼저 유효한 가로·세로 크기를 입력해 주세요."); return;
-    }
+    Config draft;
+    if (!BuildSettingsCandidate(draft,true)) return;
+    const int width=draft.width, height=draft.height;
     MONITORINFO info{sizeof(info), {}, {}, 0};
     if (!GetMonitorInfoW(MonitorFromWindow(gSettingsWnd, MONITOR_DEFAULTTONEAREST), &info)) return;
     SetEditInt(gSettingsWnd, IDC_X, info.rcWork.left + (info.rcWork.right - info.rcWork.left - width) / 2);
@@ -2942,6 +3021,12 @@ void ResizeOverlayDraft(double factor) {
     auto scaled = [factor](int value, int minimum, int maximum) {
         return ClampInt(static_cast<int>(std::round(value * factor)), minimum, maximum);
     };
+    if (KeyViewerFolded(draft)) {
+        SetEditInt(gSettingsWnd,IDC_WIDTH,scaled(draft.width,kMinFoldedWidth,10000));
+        SetEditInt(gSettingsWnd,IDC_HEIGHT,scaled(draft.height,kMinOverlayHeight,4000));
+        SetStatus(L"접기 크기를 조절했어요. 최소 250 × 300px이며 글자·노트 설정은 유지됩니다.");
+        return;
+    }
     const int noteWidth = scaled(draft.noteWidth, 24, 220);
     const int noteHeight = scaled(draft.noteHeight, 18, 140);
     const int effectiveHeight = draft.circleNotes ? std::min(noteWidth, std::max(noteHeight, 42)) : noteHeight;
@@ -3079,10 +3164,10 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         MakeButton(hwnd, IDC_CENTER, L"이 모니터 중앙으로", 390, 132, 238, 30);
         MakeButton(hwnd, IDC_MOVE_MODE, L"마우스로 위치 이동", 38, 174, 200, 30);
         MakeButton(hwnd, IDC_SAVE_POSITION, L"위치 저장", 248, 174, 160, 30);
-        MakeLabel(hwnd, L"오버레이 크기 · 최소 650 × 300px", 38, 218, 370, 24);
+        MakeLabel(hwnd, L"최소 650 × 300 · 접기 250 × 300px", 38, 218, 382, 24);
         MakeButton(hwnd, IDC_SIZE_SMALLER, L"10% 축소", 430, 214, 110, 30);
         MakeButton(hwnd, IDC_SIZE_LARGER, L"10% 확대", 552, 214, 110, 30);
-        MakeLabel(hwnd, L"창·노트 함께 조절\n레벨 글자 크기는 유지", 430, 252, 232, 40);
+        MakeLabel(hwnd, L"접기: 창 크기만 조절\n펼치기: 창·노트 함께 조절", 430, 252, 232, 40);
         MakeLabel(hwnd, L"가로", 38, 258, 50, 24); MakeEdit(hwnd, IDC_WIDTH, L"", 96, 254, 110, 26);
         MakeLabel(hwnd, L"세로", 242, 258, 50, 24); MakeEdit(hwnd, IDC_HEIGHT, L"", 300, 254, 110, 26);
         MakeButton(hwnd, IDC_CLICK_THROUGH, L"마우스 클릭을 뒤쪽 창으로 통과", 38, 300, 420, 26, BS_AUTOCHECKBOX);
@@ -3467,6 +3552,18 @@ bool PlaceInitialSettingsWindow() {
         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE;
 }
 
+HWND CreateSettingsWindow() {
+    RECT rect{0, 0, 720, 614};
+    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
+    // A normal app window remains eligible for window-capture pickers. Leave
+    // display affinity at WDA_NONE so screenshots can include settings too.
+    const DWORD extended = WS_EX_APPWINDOW | WS_EX_CONTROLPARENT;
+    AdjustWindowRectEx(&rect, style, FALSE, extended);
+    return CreateWindowExW(extended, L"KeyNoteOverlayCppSettings", L"Key Note Overlay C++ Settings", style,
+        CW_USEDEFAULT, CW_USEDEFAULT, rect.right - rect.left, rect.bottom - rect.top,
+        nullptr, nullptr, gInstance, nullptr);
+}
+
 bool CreateAppWindows(int showCommand) {
     DWORD overlayEx = static_cast<DWORD>(game_overlay::ExtendedStyle(0, gConfig.gameOverlay, gConfig.clickThrough, false));
     if (gConfig.gameOverlay || gConfig.alwaysOnTop) {
@@ -3492,29 +3589,12 @@ bool CreateAppWindows(int showCommand) {
     ApplyOverlayWindowStyle();
     ShowWindow(gOverlayWnd, SW_SHOWNA);
 
-    RECT settingsRect{0, 0, 720, 614};
-    const DWORD settingsStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
-    AdjustWindowRectEx(&settingsRect, settingsStyle, FALSE, WS_EX_TOOLWINDOW | WS_EX_CONTROLPARENT);
-    gSettingsWnd = CreateWindowExW(
-        WS_EX_TOOLWINDOW | WS_EX_CONTROLPARENT,
-        L"KeyNoteOverlayCppSettings",
-        L"Key Note Overlay C++ Settings",
-        settingsStyle,
-        CW_USEDEFAULT,
-        CW_USEDEFAULT,
-        settingsRect.right - settingsRect.left,
-        settingsRect.bottom - settingsRect.top,
-        nullptr,
-        nullptr,
-        gInstance,
-        nullptr
-    );
+    gSettingsWnd = CreateSettingsWindow();
     if (!gSettingsWnd) {
         return false;
     }
     PlaceInitialSettingsWindow();
     gAppRunning = true;
-    SetWindowDisplayAffinity(gSettingsWnd, WDA_EXCLUDEFROMCAPTURE);
     (void)showCommand;
     ShowWindow(gSettingsWnd, SW_SHOWNORMAL);
     UpdateWindow(gSettingsWnd);
@@ -3538,10 +3618,14 @@ int RunUiSelfTest(bool blockFirstReport = false) {
     int failures = 0, checks = 0;
     auto check = [&](const char* name, bool ok) { log << name << "=" << (ok ? "ok" : "FAIL") << "\n"; ++checks; if (!ok) ++failures; };
     if (!RegisterWindows()) return 1;
-    gSettingsWnd = CreateWindowW(L"KeyNoteOverlayCppSettings", L"test", WS_OVERLAPPEDWINDOW,
-        0, 0, 760, 680, nullptr, nullptr, gInstance, nullptr);
+    gSettingsWnd = CreateSettingsWindow();
     if (!gSettingsWnd) return 1;
     check("initial_clean_state", !gUnapplied && !gUnsaved && !IsWindowVisible(gSettingsWnd));
+    const auto settingsEx = GetWindowLongPtrW(gSettingsWnd,GWL_EXSTYLE);
+    DWORD settingsAffinity = 0xffffffff;
+    check("settings_is_normal_capture_selectable_window",(settingsEx & WS_EX_APPWINDOW) && !(settingsEx & WS_EX_TOOLWINDOW) &&
+        !GetWindow(gSettingsWnd,GW_OWNER));
+    check("settings_is_not_excluded_from_capture",GetWindowDisplayAffinity(gSettingsWnd,&settingsAffinity) && settingsAffinity==WDA_NONE);
     {
         const auto originalConfig=gConfig;
         const auto originalJson=gJsonConfigPath,originalIni=gIniConfigPath;
@@ -4841,7 +4925,7 @@ int RunUiSelfTest(bool blockFirstReport = false) {
     RecordDifficultyInput(0,true,403200);
     check("viewer_fold_apply_keeps_live_hold_and_completed_values",ReadSettingsControls() && KeyViewerFolded() &&
         gDifficulty.IsHeld(0) && gCompletedSkills.Completed().skills==lateAxes.skills);
-    check("viewer_fold_enlarges_width_without_changing_saved_geometry",OverlayPresentationWidth()==FoldedHudPixels(originalViewerWidth) &&
+    check("viewer_fold_uses_configured_pixel_width_without_changing_geometry",OverlayPresentationWidth()==gConfig.width &&
         gConfig.width==beforeViewerFold.width && gConfig.height==beforeViewerFold.height &&
         gConfig.noteWidth==beforeViewerFold.noteWidth && gConfig.lanesText==beforeViewerFold.lanesText);
     check("viewer_fold_saves",SaveSettings());
@@ -4859,10 +4943,11 @@ int RunUiSelfTest(bool blockFirstReport = false) {
 #if KEYNOTE_OSU_MEMORY_LINK
     const auto foldSelected=gOsuView;gOsuView={};
 #endif
-    for(int logicalWidth : {650,900}) {
-        gConfig.width=logicalWidth;
+    for(int pixelWidth : {250,400,650,900,1350}) {
+        gConfig.width=pixelWidth;gConfig.height=300;
         const int w=OverlayPresentationWidth(), h=OverlayPresentationHeight(w);
-        check("viewer_fold_has_no_reserved_note_area",h==FoldedHudPixels(CurrentHudLayout(logicalWidth).total));
+        check("viewer_fold_honors_width_and_has_no_reserved_note_area",w==pixelWidth && h==std::max(300,FoldedHudPixels(FoldedHudHeight(w))));
+        if(pixelWidth==250) check("viewer_fold_exact_250_by_300",w==250 && h==300);
         overlay::AlphaSurface foldedFrame(w,h), emptyFrame(w,h);
         Note foldNote;foldNote.lane=0;foldNote.held=true;foldNote.pressMs=404000;foldNote.label=L"D";
         gNotes={foldNote};gConfig.laneBackground=true;
@@ -4873,14 +4958,21 @@ int RunUiSelfTest(bool blockFirstReport = false) {
             std::equal(foldedFrame.pixels,foldedFrame.pixels+w*h,emptyFrame.pixels));
         BITMAPINFOHEADER info{};info.biSize=sizeof(info);info.biWidth=w;info.biHeight=-h;info.biPlanes=1;info.biBitCount=32;
         BITMAPFILEHEADER header{};header.bfType=0x4d42;header.bfOffBits=sizeof(header)+sizeof(info);header.bfSize=header.bfOffBits+w*h*4;
-        std::ofstream image(std::filesystem::path(CurrentDirectory()+L"hud-viewer-fold-"+std::to_wstring(logicalWidth)+L".bmp"),std::ios::binary);
+        std::ofstream image(std::filesystem::path(CurrentDirectory()+L"hud-viewer-fold-"+std::to_wstring(pixelWidth)+L".bmp"),std::ios::binary);
         image.write(reinterpret_cast<const char*>(&header),sizeof(header));image.write(reinterpret_cast<const char*>(&info),sizeof(info));
         image.write(reinterpret_cast<const char*>(foldedFrame.pixels),w*h*4);image.close();
         check("viewer_fold_preview_written",!!image);
-        const int normalHeight=h;
         gMoveMode=true;
-        check("viewer_fold_move_hint_has_its_own_space",OverlayPresentationHeight(w)==normalHeight+42);
+        check("viewer_fold_move_hint_has_its_own_space",OverlayPresentationHeight(w)==std::max(300,FoldedHudPixels(FoldedHudHeight(w)+28)));
         gMoveMode=false;
+        if(pixelWidth==250) {
+            for(int axis=0;axis<6;++axis) {
+                check("viewer_fold_smallest_keeps_full_axis_names_at_enlarged_font",
+                    FitDifficultyFont(foldedFrame.dc,revive_aux::SkillName(axis),FoldedHudWidth(w)-54,gHudSmallFont,22)==gHudSmallFont);
+            }
+            check("viewer_fold_smallest_keeps_three_digit_values_at_enlarged_font",
+                FitDifficultyFont(foldedFrame.dc,L"100",40,gHudSmallFont,22)==gHudSmallFont);
+        }
     }
     gConfig=foldedConfig;gConfig.difficultyHud=false;
     check("viewer_fold_respects_disabled_hud",!KeyViewerFolded() && OverlayPresentationWidth()==originalViewerWidth);
@@ -4895,6 +4987,31 @@ int RunUiSelfTest(bool blockFirstReport = false) {
         viewerFoldRect.bottom==OverlayPresentationHeight(viewerFoldRect.right));
     gConfig.keyViewerFolded=false;SyncOverlayDisplayWidth(viewerFoldWindow);GetClientRect(viewerFoldWindow,&viewerFoldRect);
     check("viewer_unfold_restores_native_surface",viewerFoldRect.right==originalViewerWidth && viewerFoldRect.bottom==originalViewerHeight);
+    gConfig=foldedConfig;FillSettingsControls(gSettingsWnd);
+    edit(IDC_WIDTH,L"250");edit(IDC_HEIGHT,L"300");
+    Config smallFold;
+    check("viewer_fold_settings_accept_250_by_300",BuildSettingsCandidate(smallFold,false) && smallFold.width==250 && smallFold.height==300);
+    edit(IDC_WIDTH,L"249");
+    check("viewer_fold_rejects_width_below_250",!BuildSettingsCandidate(smallFold,false));
+    edit(IDC_WIDTH,L"250");edit(IDC_HEIGHT,L"299");
+    check("viewer_fold_rejects_height_below_300",!BuildSettingsCandidate(smallFold,false));
+    edit(IDC_HEIGHT,L"300");
+    click(IDC_SIZE_SMALLER);
+    check("viewer_fold_resize_stops_at_250_by_300_and_keeps_notes",BuildSettingsCandidate(smallFold,false) &&
+        smallFold.width==250 && smallFold.height==300 && smallFold.noteWidth==foldedConfig.noteWidth &&
+        smallFold.noteHeight==foldedConfig.noteHeight && smallFold.travelPx==foldedConfig.travelPx);
+    check("viewer_fold_small_size_saves",SaveSettings());
+    gConfig=Config{};
+    check("viewer_fold_small_size_json_roundtrip",LoadJsonConfig() && (ClampAndRebuildConfig(),gConfig.width==250 && gConfig.height==300 && KeyViewerFolded()));
+    gConfig=Config{};LoadIniConfig();
+    check("viewer_fold_small_size_ini_roundtrip",gConfig.width==250 && gConfig.height==300 && KeyViewerFolded());
+    SyncOverlayDisplayWidth(viewerFoldWindow);GetClientRect(viewerFoldWindow,&viewerFoldRect);
+    check("viewer_fold_native_surface_is_250_by_300",viewerFoldRect.right==250 && viewerFoldRect.bottom==300);
+    FillSettingsControls(gSettingsWnd);
+    SendDlgItemMessageW(gSettingsWnd,IDC_KEY_VIEWER_FOLDED,BM_SETCHECK,BST_UNCHECKED,0);
+    check("viewer_unfold_small_size_restores_normal_minimum",ReadSettingsControls() && !KeyViewerFolded() && gConfig.width==650);
+    SyncOverlayDisplayWidth(viewerFoldWindow);GetClientRect(viewerFoldWindow,&viewerFoldRect);
+    check("viewer_unfold_native_surface_keeps_normal_minimum",viewerFoldRect.right>=650 && viewerFoldRect.bottom>=300);
     if(viewerFoldWindow)DestroyWindow(viewerFoldWindow);
     gConfig=beforeViewerFold;gSavedConfig=savedBeforeViewerFold;RebuildLaneConfig();FillSettingsControls(gSettingsWnd);
     check("viewer_unfold_restores_original_geometry",!KeyViewerFolded() && OverlayPresentationWidth()==originalViewerWidth &&
@@ -5056,8 +5173,7 @@ int RunLifecycleSelfTest(bool realTray, bool nativeMenu = false) {
         gConfigPath = gJsonConfigPath;
         gOverlayWnd = CreateWindowW(L"KeyNoteOverlayCppWindow", L"hidden lifecycle overlay", WS_POPUP,
             0, 0, 900, 220, nullptr, nullptr, gInstance, nullptr);
-        gSettingsWnd = CreateWindowW(L"KeyNoteOverlayCppSettings", L"hidden lifecycle settings", WS_OVERLAPPEDWINDOW,
-            0, 0, 760, 680, nullptr, nullptr, gInstance, nullptr);
+        gSettingsWnd = CreateSettingsWindow();
         gAppRunning = IsWindow(gOverlayWnd) && IsWindow(gSettingsWnd);
         return gAppRunning;
     };
