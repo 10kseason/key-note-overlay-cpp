@@ -2,6 +2,7 @@
 #include "osu_link_layout.h"
 #include "analysis.h"
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -35,9 +36,9 @@ int main(int argc,char** argv) {
     int failed=0,count=0;
     auto check=[&](bool pass,const char* name){++count;if(!pass){++failed;std::cerr<<"FAIL "<<name<<"\n";}};
     osu_link::Session session;
-    check(!session.Current().enabled && !session.Current().ready,"default off");
+    check(!session.Current().enabled && !session.Current().ready && session.Current().reviveAuxiliary.empty(),"default off");
     check(!session.Start(false) && !session.Current().enabled,"consent required");
-    session.Stop();check(!session.Current().enabled,"idempotent stop");
+    session.Stop();check(!session.Current().enabled && session.Current().reviveAuxiliary.empty(),"idempotent stop clears auxiliary");
     for(const auto* s:{L"..",L"../escape",L"..\\escape",L"C:secret",L"a/b",L"a\\b",L"file.",L"file ",L"\nfoo"})
         check(!osu_link::SafeComponent(s),"path component rejection");
     check(osu_link::SafeComponent(L"곡명 [5K].osu"),"unicode component");
@@ -48,6 +49,27 @@ int main(int argc,char** argv) {
     check(!osu_link::ResolveChart(root/L"Songs",L"set",L"map.osu").empty(),"contained chart");
     check(osu_link::ResolveChart(root/L"Songs",L"set",L"map.txt").empty(),"osu extension only");
     check(osu_link::ResolveChart(root/L"Songs",L"..",L"map.osu").empty(),"traversal denied");
+    for(int keys=1;keys<=revive::MaxKeys;++keys) for(bool hasLn : {false,true}) {
+        const auto file=root/L"Songs"/L"set"/L"map.osu";
+        {
+            std::ofstream out(file);
+            out << "osu file format v14\n[General]\nMode:3\n[Metadata]\nTitle:Synthetic\nArtist:Test\nVersion:Normal\n"
+                << "[Difficulty]\nCircleSize:" << keys << "\nOverallDifficulty:8\n[HitObjects]\n";
+            for(int i=0;i<80;++i) {
+                out << ((2*(i%keys)+1)*512/(2*keys)) << ",192," << i*100;
+                // Even a short real LN has an explicit tail in the file.
+                if(hasLn) out << ",128,0," << i*100+20 << ":0:0:0:0:\n";
+                else out << ",1,0,0:0:0:0:\n";
+            }
+        }
+        const auto analysis=chartcalc::Analyze(chartcalc::LoadChart(file));
+        const auto skills=revive_aux::Analyze(analysis.chart);
+        bool allAxes=skills.ready;
+        for(double value:skills.skills)allAxes &= std::isfinite(value) && value>=0 && value<=100;
+        check(analysis.chart.keys==keys && analysis.chart.notes.size()==80 && allAxes && skills.holdKnown &&
+            (hasLn ? skills.skills[5]>0 : skills.skills[5]==0),
+            "1K through 18K files distinguish real LN and LN-free charts");
+    }
     std::filesystem::remove(root/L"Songs"/L"set"/L"map.osu");
     std::filesystem::remove(root/L"Songs"/L"set");std::filesystem::remove(root/L"Songs");std::filesystem::remove(root);
     std::vector<unsigned char> memory(0x40000);

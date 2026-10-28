@@ -4,6 +4,9 @@
 #include "aery_auxiliary_reference.h"
 #include "dan_rating.h"
 #include "revive10_reference.h"
+#include "ln4_reference.h"
+#include "analysis_key_mode.h"
+#include "lane_display.h"
 
 #include <cmath>
 #include <algorithm>
@@ -310,6 +313,23 @@ int main() {
 
     using pattern::RatingProfile;
     using pattern::DanHeight;
+    pattern::Snapshot lnSample; lnSample.ready = true; lnSample.idle = false; lnSample.profile = RatingProfile::Osu4;
+    for (const auto& band : pattern::Dan4LnReference) {
+        lnSample.stars = band.strain;
+        const auto estimate = pattern::EstimateLnDan(lnSample);
+        check("ln4_reference_anchor", estimate.available && estimate.low == band.low && estimate.high == band.high &&
+            estimate.height == DanHeight::Level && estimate.outside == 0);
+    }
+    lnSample.stars = pattern::Dan4LnReference[2].strain;
+    check("ln4_reversed_references_are_explicit", pattern::FormatLnDan(lnSample) == L"LN 3~4단 수준");
+    lnSample.stars = pattern::Dan4LnReference.back().strain;
+    check("ln4_extra_ranks_are_numeric", pattern::FormatLnDan(lnSample) == L"LN 15단 수준");
+    lnSample.stars = 0;
+    check("ln4_outside_range", pattern::FormatLnDan(lnSample) == L"LN 1단↓");
+    lnSample.limited = true;
+    check("ln4_limited_is_not_published", pattern::FormatLnDan(lnSample).empty());
+    lnSample.limited = false; lnSample.profile = RatingProfile::Osu7;
+    check("ln4_never_applied_to_other_modes", !pattern::EstimateLnDan(lnSample).available);
     auto danText = [](RatingProfile profile, double strain) {
         return pattern::FormatDan(profile, pattern::EstimateDan(profile, strain));
     };
@@ -419,6 +439,66 @@ int main() {
     check("dan_invalid_strain_rejected", !pattern::EstimateDan(RatingProfile::Osu4, -1).available &&
         !pattern::EstimateDan(RatingProfile::Osu4, std::numeric_limits<double>::quiet_NaN()).available &&
         !pattern::EstimateDan(RatingProfile::Osu10, std::numeric_limits<double>::infinity()).available);
+    pattern::AnalysisKeySelector selector;
+    selector.Reset(10, -1);
+    for (int i = 0; i < 64; ++i) { selector.Key((i % 4) * 2, true, i * 125.); selector.Key((i % 4) * 2, false, i * 125. + 10); }
+    check("auto_keys_wait_for_full_observation", selector.Pending());
+    selector.Update(8000);
+    check("auto_keys_lock_sparse_registered_subset", !selector.Pending() && selector.Keys() == 4 && !selector.Conflict());
+    auto compact = overlay::MakeLaneDisplay(10,900,100,selector,true);
+    auto full = overlay::MakeLaneDisplay(10,900,100,selector,false);
+    check("folded_layout_preserves_slot_size_and_pitch", compact.compact && compact.visible==4 && compact.width==404 &&
+        compact.slotWidth==full.slotWidth && compact.pitch==full.pitch && compact.index[6]==3 && compact.index[1]==-1);
+    bool geometry=true;
+    for(int width : {240,600,900,1200}) for(int spacing : {50,100,160}) {
+        auto folded=overlay::MakeLaneDisplay(10,width,spacing,selector,true);
+        auto original=overlay::MakeLaneDisplay(10,width,spacing,selector,false);
+        geometry &= folded.width>=240 && folded.width<=width && folded.pitch==original.pitch && folded.slotWidth==original.slotWidth;
+    }
+    check("folded_layout_has_safe_width_without_rescaling", geometry);
+    for (int i = 0; i < 20; ++i) { selector.Key(0, true, 8100 + i*125.); selector.Key(0, false, 8110 + i*125.); }
+    check("auto_keys_never_shrink_in_session", selector.Keys() == 4);
+    selector.Key(9, true, 11000); selector.Key(9, false, 11010);
+    check("auto_late_extra_key_is_conflict", selector.Conflict() && selector.Keys() == 4);
+    check("folding_reverts_on_extra_key", !overlay::MakeLaneDisplay(10,900,100,selector,true).compact);
+    selector.Key(0, true, 21010);
+    check("auto_new_session_relearns_after_ten_seconds", selector.Pending() && !selector.Conflict() && selector.Observed() == 1);
+    check("new_session_unfolds_while_observing", overlay::MakeLaneDisplay(10,900,100,selector,true).visible==10);
+    selector.Key(0, true, 31010); selector.Update(31010);
+    check("auto_held_repeat_is_not_new_session_or_samples", selector.Pending() && selector.Observed() == 1);
+    selector.Reset(10, -1);
+    for (int i=0;i<64;++i) { selector.Key(i%3,true,i*125.); selector.Key(i%3,false,i*125.+10); }
+    selector.Update(8000);
+    check("auto_does_not_invent_fourth_key", selector.Pending() && selector.Observed()==3);
+    selector.Reset(10, 7);
+    selector.Key(9,true,0); selector.Key(9,false,10);
+    check("manual_basis_preserves_physical_lane_selection", selector.Keys()==7 && !selector.Pending() && !selector.Conflict());
+    for(int lane=0;lane<7;++lane){selector.Key(lane,true,20+lane*20);selector.Key(lane,false,30+lane*20);}
+    check("manual_extra_keys_not_silently_discarded", selector.Keys()==7 && selector.Conflict());
+    selector.Reset(10, 999);
+    check("invalid_key_mode_uses_registered_default", selector.Keys()==10 && !selector.Pending());
+    selector.Reset(10,4);
+    for(int lane : {0,2,4,6}) { selector.Key(lane,true,lane*20.); selector.Key(lane,false,lane*20.+10); }
+    check("manual_folding_waits_for_repeated_physical_subset", !selector.CompactReady());
+    for(int lane : {0,2,4,6}) { selector.Key(lane,true,200+lane*20.); selector.Key(lane,false,210+lane*20.); }
+    check("manual_folding_uses_observed_not_first_four_keys", selector.CompactReady() &&
+        overlay::MakeLaneDisplay(10,900,100,selector,true).index[6]==3 && !overlay::MakeLaneDisplay(10,900,100,selector,true).Visible(1));
+    auto subset=stream(64,125,4,10);subset.SetAnalysisKeys(4);
+    auto native4=stream(64,125,4,4);
+    check("analysis_basis_changes_without_changing_input", subset.Evaluate(7999).profile==pattern::RatingProfile::Osu4 &&
+        subset.Evaluate(7999).samples==native4.Evaluate(7999).samples && std::abs(subset.Evaluate(7999).rating-native4.Evaluate(7999).rating)<1e-12);
+    auto tooMany=stream(64,125,5,10);tooMany.SetAnalysisKeys(4);
+    check("manual_conflict_suppresses_rating_but_keeps_nps", tooMany.Evaluate(7999).keyModeConflict && !tooMany.Evaluate(7999).ready && tooMany.Evaluate(7999).currentNps>0);
+    DifficultyEstimator sparse10(64),compact10(10);sparse10.SetAnalysisKeys(10);
+    for(int i=0;i<80;i++){sparse10.KeyDown(32+i%10,i*100.);sparse10.KeyUp(32+i%10,i*100.+10);compact10.KeyDown(i%10,i*100.);compact10.KeyUp(i%10,i*100.+10);}
+    check("10k_basis_packs_sparse_physical_indices", sparse10.Evaluate(7999).ready && std::abs(sparse10.Evaluate(7999).rating-compact10.Evaluate(7999).rating)<1e-12);
+    pattern::LiveContinuity keyContinuity;
+    auto readyKeys=native4.Evaluate(7999);keyContinuity.RecordActivity(7990);keyContinuity.Update(readyKeys,7999);
+    auto pendingKeys=readyKeys;pendingKeys.ready=false;pendingKeys.keyModePending=true;
+    check("pending_key_mode_never_retains_stale_rating", !keyContinuity.Update(pendingKeys,8000).ready);
+    pattern::PatternSummary conflictedKeys;conflictedKeys.Observe(readyKeys);
+    auto conflictKeys=readyKeys;conflictKeys.ready=false;conflictKeys.keyModeConflict=true;conflictedKeys.Observe(conflictKeys);conflictedKeys.Observe(pattern::Snapshot{});
+    check("key_conflict_blocks_completed_peak", !conflictedKeys.Completed().ready);
     std::cout << "checks=" << checks << " failures=" << failed << '\n';
     return failed ? 1 : 0;
 }

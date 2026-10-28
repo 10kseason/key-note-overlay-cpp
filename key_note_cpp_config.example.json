@@ -22,6 +22,7 @@
     "key_text_bottom": true,
     "difficulty_enabled": true,
     "difficulty_hud": true,
+    "analysis_key_mode": 0,
     "report_auto_save": false,
     "game_overlay": false
   },

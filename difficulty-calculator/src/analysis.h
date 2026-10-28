@@ -12,7 +12,6 @@ struct Analysis {
     double averageNps = 0;
     double maximumNps = 0;
     double holdWeight = pattern::DefaultHoldWeight;
-    int strongestWindows = 0;
     bool limited = false;
     pattern::Snapshot summary;
     std::vector<Point> points;

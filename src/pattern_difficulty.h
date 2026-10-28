@@ -11,6 +11,9 @@ enum class RatingProfile { Generic, Osu4, Osu7, Osu8, Osu10, Aery5 };
 RatingProfile ProfileForKeys(int keys);
 
 struct Snapshot {
+    int analysisKeys = 0;
+    bool keyModePending = false;
+    bool keyModeConflict = false;
     double score = 0.0;
     RatingProfile profile = RatingProfile::Generic;
     double stars = 0.0;
@@ -75,6 +78,8 @@ public:
 
     explicit DifficultyEstimator(int lanes = 8, double holdWeight = DefaultHoldWeight);
     void Reset(int lanes);
+    // Select a comparison basis without changing or discarding physical lanes.
+    void SetAnalysisKeys(int keys) { analysisKeys_ = keys >= 4 && keys <= 10 ? keys : 0; }
     void ReleaseAll(double timeMs = -1.0);
     void KeyDown(int lane, double timeMs);
     void KeyUp(int lane, double timeMs);
@@ -87,6 +92,7 @@ private:
     std::deque<Press> events_;
     std::array<double, 256> heldSince_{};
     int lanes_ = 8;
+    int analysisKeys_ = 0;
     double holdWeight_ = DefaultHoldWeight;
     double startedMs_ = -1.0;
     double lastDownMs_ = -1.0;

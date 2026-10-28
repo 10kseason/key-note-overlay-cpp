@@ -1,0 +1,62 @@
+{
+  "source_hashes": {
+    "new_calc.py": "950f8b81621a33d200a490ae46f14f71ef050892ef68568c2cf09110c44a8795",
+    "config.yaml": "bcb3cebad97604cd7ffe323ad009c2e9c4d8913bd4b3212365dc08ca033fab59"
+  },
+  "cases": 18,
+  "keys": 4,
+  "preset": "qwilight_bms_ez",
+  "weights": [
+    [
+      1.0,
+      1.0,
+      0.1,
+      0.1
+    ],
+    [
+      0.75,
+      1.0,
+      0.35,
+      0.1
+    ],
+    [
+      0.1,
+      0.35,
+      1.0,
+      0.75
+    ],
+    [
+      0.1,
+      0.1,
+      1.0,
+      1.0
+    ]
+  ],
+  "visual": [
+    [
+      1.0,
+      1,
+      1.5,
+      1.25
+    ],
+    [
+      1,
+      1.0,
+      1,
+      1.5
+    ],
+    [
+      1.5,
+      1,
+      1.0,
+      1
+    ],
+    [
+      1.25,
+      1.5,
+      1,
+      1.0
+    ]
+  ],
+  "scope": "synthetic parity; fixed placement; auto target; no scratch; no player skill validation"
+}

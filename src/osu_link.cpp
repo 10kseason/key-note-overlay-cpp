@@ -1,6 +1,8 @@
 #include "osu_link.h"
 #include "osu_link_layout.h"
 #include "analysis.h"
+#include "revive_auxiliary.h"
+#include "dan_rating.h"
 #include <windows.h>
 #include <tlhelp32.h>
 #include <wincrypt.h>
@@ -171,15 +173,21 @@ void Session::Run(std::filesystem::path songsOverride) {
                         if(Md5(path)!=identity.md5) {next.status=L"게임의 채보와 파일 내용이 다릅니다. osu!에서 채보를 새로고침해 주세요.";previous={};}
                         else {
                             auto analysis=chartcalc::Analyze(chartcalc::LoadChart(path),pattern::DefaultHoldWeight,&cancelled_);
+                            const auto auxiliary=revive_aux::Analyze(analysis.chart,&cancelled_);
                             layout::Identity after;
                             if(!reader->Alive() || !reader->Selection(after) || after!=identity || Md5(path)!=identity.md5) {
                                 next.status=L"선택이 바뀌었습니다. 새 채보 확인 중…";previous={};
                             } else {
                                 next.ready=true;next.keys=analysis.chart.keys;next.title=analysis.chart.title;
                                 next.variant=analysis.chart.variant;next.difficulty=chartcalc::DifficultyLabel(analysis.summary);
+                                next.reviveAuxiliary=revive_aux::Label(auxiliary);
+                                next.reviveCompact=revive_aux::Label(auxiliary,true);
+                                next.reviveSkills=revive_aux::Details(auxiliary);
+                                next.revive=auxiliary;
+                                next.lnDifficulty=pattern::FormatLnDan(analysis.summary);
                                 next.status=L"연동 ON · 원본 채보 1.00× / 게임 모드 변경 미반영";
-                                next.details=chartcalc::Basis(next.keys)+L"\n"+std::to_wstring(analysis.chart.notes.size())+L" 노트 · 최대 NPS "+chartcalc::Number(analysis.maximumNps,0)+
-                                    L" · 강한 "+std::to_wstring(analysis.strongestWindows)+L"개 구간 평균";
+                                next.details=chartcalc::Basis(next.keys)+(next.lnDifficulty.empty()?L"":L" · "+next.lnDifficulty)+L"\n"+std::to_wstring(analysis.chart.notes.size())+L" 노트 · 최대 NPS "+chartcalc::Number(analysis.maximumNps,0)+
+                                    L" · 실시간 방식 최고 구간";
                                 if(analysis.limited) next.details+=L"\n분석 한도 초과: 난이도 보류";
                                 previous=identity;previousPath=path;previousTime=time;cached=next;
                             }

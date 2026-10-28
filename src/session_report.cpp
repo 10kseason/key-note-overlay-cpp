@@ -43,7 +43,7 @@ std::string Number(double value, int precision = 1) {
     out << std::fixed << std::setprecision(precision) << (std::isfinite(value) ? value : 0.0);
     return out.str();
 }
-bool Valid(const pattern::Snapshot& s) { return s.ready && !s.idle && !s.retained && !s.limited; }
+bool Valid(const pattern::Snapshot& s) { return s.ready && !s.idle && !s.retained && !s.limited && !s.keyModePending && !s.keyModeConflict; }
 }
 
 double DifficultyValue(const pattern::Snapshot& s) {
@@ -56,7 +56,10 @@ double DifficultyValue(const pattern::Snapshot& s) {
 std::string DifficultyLabel(const pattern::Snapshot& s) {
     if (!Valid(s)) return "측정 부족 / 보류";
     const auto dan = pattern::EstimateDan(s);
-    if (dan.available) return Utf8(pattern::FormatDan(s.profile, dan));
+    if (dan.available) {
+        const auto ln = pattern::FormatLnDan(s);
+        return Utf8(pattern::FormatDan(s.profile, dan) + (ln.empty() ? L"" : L" · " + ln));
+    }
     if (s.profile == pattern::RatingProfile::Aery5)
         return std::string(s.outsideCalibration < 0 ? "<" : s.outsideCalibration > 0 ? ">" : "") + "⑤" + Number(s.rating);
     return Number(s.score, 0) + "/100";
@@ -94,6 +97,7 @@ void Recorder::Key(int lane, bool down, double nowMs) {
 void Recorder::Observe(const pattern::Snapshot& snapshot, double nowMs) {
     if (!Active() || !std::isfinite(nowMs) || nowMs < lastInputMs_) return;
     session_.analysisLimited |= snapshot.limited;
+    session_.analysisKeyConflict |= snapshot.keyModeConflict;
     Point point{nowMs - startMs_, snapshot};
     if (Valid(snapshot) && (!Valid(session_.peak.snapshot) || DifficultyValue(snapshot) > DifficultyValue(session_.peak.snapshot)))
         session_.peak = point;
@@ -144,7 +148,9 @@ std::string RenderHtml(const Session& s) {
 :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#0e1524;color:#e5edf8;font:15px/1.65 system-ui,'Malgun Gothic',sans-serif}main{max-width:1120px;margin:auto;padding:40px 24px}h1{font-size:34px;margin:8px 0}h2{font-size:20px;margin:28px 0 8px}.eyebrow{color:#7dd3fc;letter-spacing:.13em}p,.muted{color:#aabbd1}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin:24px 0}.card,section{border:1px solid #29354b;border-radius:14px;background:#151f32;padding:18px}.value{display:block;font-size:26px;font-weight:700;color:#fff}.warning{color:#fcd88a;border-left:3px solid #fcd88a;padding-left:14px}.scroll{overflow-x:auto}svg{display:block;font:12px system-ui}svg text{fill:#aabbd1}.chart{width:100%;height:auto}.grid{stroke:#2a3950;stroke-width:1}table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:10px;border-bottom:1px solid #2a3950}footer{margin-top:28px;color:#aabbd1;font-size:13px}@media print{body{background:#fff;color:#172033}.card,section{background:#fff;color:#172033}.value{color:#172033}main{padding:10px}.scroll{overflow:visible}}
 </style><main><div class="eyebrow">KEY NOTE OVERLAY · LOCAL REPORT</div><h1>이번 연주는 어땠나요?</h1><p>)HTML";
     out << Escape(s.startedLocal) << " · " << s.lanes << "K · " << Escape(s.reason) << "</p>";
-    const bool peakValid = Valid(s.peak.snapshot) && !s.analysisLimited;
+    const int analysisKeys = s.peak.snapshot.analysisKeys > 0 ? s.peak.snapshot.analysisKeys : s.lanes;
+    if (analysisKeys != s.lanes) out << "<p>등록 배치 " << s.lanes << "키 · 난이도 분석 기준 " << analysisKeys << "K</p>";
+    const bool peakValid = Valid(s.peak.snapshot) && !s.analysisLimited && !s.analysisKeyConflict;
     out << "<div class='cards'><div class='card'>연주 길이<span class='value'>" << Number(s.durationMs / 1000) << "초</span></div>"
         << "<div class='card'>총 누름<span class='value'>" << s.presses << "회</span></div>"
         << "<div class='card'>최대 1초 NPS<span class='value'>" << (s.truncated ? "≥ " : "") << Number(maxNps, 0) << "</span></div>"
@@ -153,6 +159,7 @@ std::string RenderHtml(const Session& s) {
         << "단위 합격·정확도·실력 인증이 아닌, 실제 누른 입력의 추정 부담입니다.</p>";
     if (s.truncated) out << "<p class='warning'>기록 한도에 도달했습니다. 타건 흐름은 첫 50,000개, 그래프는 첫 7,200개 관측점까지만 보존됩니다. 최대 NPS는 보존된 입력 기준이며 전체 최고치보다 낮을 수 있습니다.</p>";
     if (s.analysisLimited) out << "<p class='warning'>분석 입력 버퍼가 초과된 구간이 있어 세션 최고 난이도를 보류합니다. 해당 구간의 난이도 선은 끊어 표시합니다.</p>";
+    if (s.analysisKeyConflict) out << "<p class='warning'>고정한 분석 키 수보다 많은 키가 감지되어 세션 최고 난이도를 보류합니다. 분석 초기화 또는 키 수 설정 변경이 필요합니다.</p>";
     auto chart = [&](bool difficulty) {
         const char* title = difficulty ? "시간별 추정 난이도" : "시간별 NPS";
         double maximum = 1.0;
@@ -184,7 +191,7 @@ std::string RenderHtml(const Session& s) {
         out << "<path d='" << path.str() << "' fill='none' stroke='" << (difficulty ? "#c4a5ff" : "#67d9ec") << "' stroke-width='2'/></svg>";
         out << (difficulty ? "<p>세로축은 " : "<p>");
         if (difficulty) {
-            const auto profile = pattern::ProfileForKeys(s.lanes);
+            const auto profile = pattern::ProfileForKeys(analysisKeys);
             out << (profile == pattern::RatingProfile::Osu10 ? "10K 패턴 비교 부담" : profile == pattern::RatingProfile::Aery5 ? "AERY ⑤ 추정값" : profile == pattern::RatingProfile::Generic ? "입력 지수 (0~100)" : "osu!mania 구간 strain 환산값 (★)");
             out << ". 점에 마우스를 올리면 단위·등급을 볼 수 있습니다. 준비 중·연결 대기·표본 손실은 선을 잇지 않습니다.";
         } else out << "최근 1초 누름 수를 약 0.5초마다 관측합니다. 타이머 지연은 빈 구간으로 남기며, 카드의 최대 NPS는 타건 시각에서 별도로 계산합니다.";
@@ -214,8 +221,8 @@ std::string RenderHtml(const Session& s) {
             << "–" << Number(note.endMs / 1000, 3) << "초" << (note.interrupted ? " · 설정 변경/종료로 홀드 닫힘" : "") << "</title></rect>";
     }
     out << "</svg></div></section><footer>Key Note Overlay · 리포트 v1 · 난이도 모델 v2.8";
-    if (s.lanes == 5) out << " / AERY 저레벨 보정 v2.12 + 230개 보조 기준 v2.13";
-    if (s.lanes == 10) out << " / 10K Revive 2026 기준 v2.12";
+    if (analysisKeys == 5) out << " / AERY 저레벨 보정 v2.12 + 230개 보조 기준 v2.13";
+    if (analysisKeys == 10) out << " / 10K Revive 2026 기준 v2.12";
     out << " / LN 추가 부담 2/3. 곡명·게임 판정·놓친 노트·손 배치·클리어 여부는 알 수 없습니다. 다른 키 수의 수치를 직접 비교하지 마세요. 로컬 시각과 등록 레인의 타이밍이 포함되므로 공유 전 확인하세요. 외부 통신·스크립트·글꼴 다운로드가 없는 독립 HTML입니다.</footer></main></html>";
     return out.str();
 }

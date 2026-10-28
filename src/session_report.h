@@ -16,6 +16,7 @@ struct Session {
     std::size_t presses = 0;
     bool truncated = false;
     bool analysisLimited = false;
+    bool analysisKeyConflict = false;
     std::vector<Note> notes;
     std::vector<Point> points;
     Point peak{};

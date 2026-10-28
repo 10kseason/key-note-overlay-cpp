@@ -1,5 +1,6 @@
 #include "dan_rating.h"
 #include "revive10_reference.h"
+#include "ln4_reference.h"
 #include <algorithm>
 #include <cmath>
 
@@ -40,6 +41,17 @@ DanEstimate EstimateDan(RatingProfile profile, double strain) {
 
 DanEstimate EstimateDan(const Snapshot& snapshot) {
     return EstimateDan(snapshot.profile, snapshot.profile == RatingProfile::Osu10 ? snapshot.rating : snapshot.stars);
+}
+
+DanEstimate EstimateLnDan(const Snapshot& snapshot) {
+    if (snapshot.profile != RatingProfile::Osu4 || !snapshot.ready || snapshot.idle || snapshot.limited ||
+        snapshot.keyModePending || snapshot.keyModeConflict) return {};
+    return CompareDan(snapshot.stars, Dan4LnReference);
+}
+
+std::wstring FormatLnDan(const Snapshot& snapshot) {
+    const auto estimate = EstimateLnDan(snapshot);
+    return estimate.available ? L"LN " + FormatDan(RatingProfile::Generic, estimate) : L"";
 }
 
 const wchar_t* DanBasis(RatingProfile profile) {

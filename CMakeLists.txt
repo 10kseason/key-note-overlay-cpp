@@ -2,16 +2,24 @@ cmake_minimum_required(VERSION 3.20)
 
 project(KeyNoteOverlayCpp LANGUAGES CXX)
 
+option(KEYNOTE_OSU_MEMORY_LINK "Compile the optional osu! process-memory reader" ON)
+
 add_executable(key_note_overlay_cpp WIN32
     src/key_note_overlay_cpp.cpp
     src/pattern_difficulty.cpp
     src/mania_strain.cpp
     src/dan_rating.cpp
     src/session_report.cpp
-    src/osu_link.cpp
-    difficulty-calculator/src/chart_reader.cpp
-    difficulty-calculator/src/analysis.cpp
+    src/revive_native.cpp
+    src/revive_auxiliary.cpp
+    src/revive_live.cpp
 )
+if(KEYNOTE_OSU_MEMORY_LINK)
+    target_sources(key_note_overlay_cpp PRIVATE src/osu_link.cpp
+        difficulty-calculator/src/chart_reader.cpp difficulty-calculator/src/analysis.cpp)
+endif()
+target_compile_definitions(key_note_overlay_cpp PRIVATE
+    KEYNOTE_OSU_MEMORY_LINK=$<BOOL:${KEYNOTE_OSU_MEMORY_LINK}>)
 target_include_directories(key_note_overlay_cpp PRIVATE src difficulty-calculator/src)
 
 target_compile_features(key_note_overlay_cpp PRIVATE cxx_std_17)
@@ -36,13 +44,16 @@ if(MSVC)
 endif()
 
 if(MINGW)
+    # Match the validated native port's arithmetic; do not fuse multiply/add.
+    set_source_files_properties(src/revive_native.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
     target_compile_options(key_note_overlay_cpp PRIVATE -Wall -Wextra)
     target_link_options(key_note_overlay_cpp PRIVATE -static -static-libgcc -static-libstdc++)
 endif()
 
 include(CTest)
 if(BUILD_TESTING)
-    add_executable(osu_link_test tests/osu_link_test.cpp src/osu_link.cpp
+  if(KEYNOTE_OSU_MEMORY_LINK)
+    add_executable(osu_link_test tests/osu_link_test.cpp src/osu_link.cpp src/revive_native.cpp src/revive_auxiliary.cpp
         difficulty-calculator/src/chart_reader.cpp difficulty-calculator/src/analysis.cpp
         src/pattern_difficulty.cpp src/mania_strain.cpp src/dan_rating.cpp)
     target_include_directories(osu_link_test PRIVATE src difficulty-calculator/src)
@@ -58,6 +69,36 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME osu_link_boundaries COMMAND osu_link_test)
     set_tests_properties(osu_link_boundaries PROPERTIES TIMEOUT 30)
+  elseif(CMAKE_OBJDUMP)
+    add_test(NAME no_osu_memory_binary COMMAND ${CMAKE_COMMAND}
+        -DBINARY=$<TARGET_FILE:key_note_overlay_cpp> -DOBJDUMP=${CMAKE_OBJDUMP}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/no_osu_memory.cmake)
+  endif()
+    add_executable(revive_auxiliary_test tests/revive_auxiliary_test.cpp src/revive_native.cpp src/revive_auxiliary.cpp)
+    target_include_directories(revive_auxiliary_test PRIVATE src difficulty-calculator/src)
+    target_compile_features(revive_auxiliary_test PRIVATE cxx_std_17)
+    if(MINGW)
+        target_compile_options(revive_auxiliary_test PRIVATE -Wall -Wextra)
+        target_link_options(revive_auxiliary_test PRIVATE -static -static-libgcc -static-libstdc++)
+    endif()
+    if(MSVC)
+        target_compile_options(revive_auxiliary_test PRIVATE /utf-8)
+    endif()
+    add_test(NAME revive_auxiliary COMMAND revive_auxiliary_test)
+    set_tests_properties(revive_auxiliary PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/revive" TIMEOUT 20)
+    add_executable(revive_live_test tests/revive_live_test.cpp src/revive_live.cpp src/revive_auxiliary.cpp src/revive_native.cpp)
+    target_include_directories(revive_live_test PRIVATE src difficulty-calculator/src)
+    target_compile_features(revive_live_test PRIVATE cxx_std_17)
+    if(MINGW)
+        target_compile_options(revive_live_test PRIVATE -Wall -Wextra)
+        target_link_options(revive_live_test PRIVATE -static -static-libgcc -static-libstdc++)
+    endif()
+    if(MSVC)
+        target_compile_options(revive_live_test PRIVATE /utf-8)
+    endif()
+    add_test(NAME revive_live COMMAND revive_live_test)
+    set_tests_properties(revive_live PROPERTIES TIMEOUT 20)
     add_executable(game_overlay_test tests/game_overlay_test.cpp)
     target_compile_features(game_overlay_test PRIVATE cxx_std_17)
     target_include_directories(game_overlay_test PRIVATE src)
@@ -84,6 +125,18 @@ if(BUILD_TESTING)
     add_test(NAME session_report COMMAND session_report_test)
     set_tests_properties(session_report PROPERTIES TIMEOUT 30)
     add_executable(pattern_features EXCLUDE_FROM_ALL tools/pattern_features.cpp src/pattern_difficulty.cpp src/mania_strain.cpp)
+    add_executable(ln4_reference EXCLUDE_FROM_ALL tools/ln4_reference.cpp
+        difficulty-calculator/src/chart_reader.cpp difficulty-calculator/src/analysis.cpp
+        src/pattern_difficulty.cpp src/mania_strain.cpp src/dan_rating.cpp)
+    target_include_directories(ln4_reference PRIVATE src difficulty-calculator/src)
+    target_compile_features(ln4_reference PRIVATE cxx_std_17)
+    target_compile_definitions(ln4_reference PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    if(MINGW)
+        target_link_options(ln4_reference PRIVATE -static -static-libgcc -static-libstdc++)
+    endif()
+    if(MSVC)
+        target_compile_options(ln4_reference PRIVATE /utf-8)
+    endif()
     target_compile_features(pattern_features PRIVATE cxx_std_17)
     target_include_directories(pattern_features PRIVATE src)
     if(MINGW)

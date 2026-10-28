@@ -2,6 +2,12 @@
 
 Windows rhythm-game key overlay for OBS, osu!, and Qwilight. It captures configured keyboard lanes with a low-level Win32 keyboard hook and renders notes in a straight lane layout. Unregistered keys are ignored before rendering.
 
+**v2.15 — 1~18K 보조지표·큰 글씨·홀드 오인식 수정:** 오버레이 크기 10% 축소/확대, 레인 간격 조절, 큰 측정 레벨·보조지표·4K LN 표시를 제공합니다. 6개 스킬 칸을 모두 보여주며 실시간은 5개 누름 특징을 갱신하고, 타건만으로 확인할 수 없는 홀드는 `—`로 표시합니다. osu! 선택 채보의 홀드는 파일의 실제 LN으로 계산합니다. [변경·검증 내역](docs/release-v2.15.md)
+
+[일반판 ZIP](https://github.com/10kseason/key-note-overlay-cpp/releases/download/v2.15/KeyNoteOverlayCpp-v2.15-Windows-x64.zip) · [NoOsuMemory ZIP](https://github.com/10kseason/key-note-overlay-cpp/releases/download/v2.15/KeyNoteOverlayCpp-v2.15-NoOsuMemory-Windows-x64.zip)
+
+일반판의 osu! 선곡 연동은 매 실행 OFF이며 직접 동의해야 켜집니다. NoOsuMemory는 게임 메모리 리더와 연동 UI를 컴파일에서 제외합니다. 4~10K 프리셋 외 1~3K·11~18K는 키를 직접 등록하고 `등록 키 수 (기존)`을 사용하세요. 원본 4K LN Dan Courses v2 1~15단의 보조 비교는 일반 Reform과 구분합니다. [스킬 범위](docs/revive-cpp-auxiliary.md) · [4K LN 기준](docs/ln4-reference.md)
+
 ## 이 기능의 위험부담은 전부 사용자 몫입니다!!!
 
 **실험적인 osu! 선곡 연동은 게임 프로세스 메모리를 읽습니다. 안티치트 제재·계정 불이익이 없다고 보장하지 않습니다. 기본 OFF이며, 앱을 다시 켤 때마다 OFF입니다.** 설정의 별도 위험 확인을 거쳐야 켜집니다. [범위·사용 방법·읽기 전용 경계](docs/osu-link.md)를 먼저 확인하세요. 기존 독립 오버레이는 이 옵션을 켜지 않고 사용할 수 있습니다.
@@ -38,6 +44,7 @@ Download the portable Windows x64 ZIP from [Releases](https://github.com/10kseas
 - Per-key color picker/HEX and 0–100% opacity, saved by physical key across presets
 - Chord alignment: keydowns within 15 ms render on the first keydown row
 - Adjustable overlay position, size, note travel, and release fade
+- One-click 10% shrink/grow controls for the window, notes, and travel; lane-spacing slider with numeric fine tuning
 - Always-on-top and click-through overlay options
 - Separate capture-safe overlay/settings windows for OBS
 - Tray icon while running: click to open settings, right-click for a foreground menu even when settings are minimized; the overlay yields to settings and their dialogs while editing
@@ -45,7 +52,7 @@ Download the portable Windows x64 ZIP from [Releases](https://github.com/10kseas
 
 ## Build
 
-별도 파일 분석 앱 **ChartDifficultyCalculator v0.1.0**도 같은 릴리즈의 ZIP으로 제공합니다. `.osu` 또는 지원되는 BMS를 직접 골라 구간 그래프와 난이도 요약을 확인하며 게임 메모리를 읽지 않습니다. [계산기 소스·지원 범위·빌드 안내](https://github.com/10kseason/key-note-overlay-cpp/tree/main/difficulty-calculator)를 참고하세요.
+별도 파일 분석 앱 **ChartDifficultyCalculator**도 같은 릴리즈의 ZIP으로 제공합니다. `.osu` 또는 지원되는 BMS를 직접 골라 구간 그래프와 난이도 요약을 확인하며 게임 메모리를 읽지 않습니다. [계산기 소스·지원 범위·빌드 안내](https://github.com/10kseason/key-note-overlay-cpp/tree/main/difficulty-calculator)를 참고하세요.
 
 Requirements:
 
@@ -80,8 +87,8 @@ Use `run_cpp_overlay.bat` to start the new build from the repository directory a
 설정은 여섯 탭으로 나뉩니다.
 
 - **키 배치**: 4K~10K 프리셋, 순서대로 키 등록, 선택 키 변경, 순서 이동, 삭제, 쉼표로 직접 입력.
-- **위치 · OBS**: osu!·Qwilight 게임용 모드, 드래그 이동·위치 자동 저장, 좌표와 크기, 현재 모니터 중앙 배치, 마우스 클릭 통과, 항상 위, 위치 확인용 배경.
-- **모양 · 움직임**: Classic/Neon/Minimal, 노트 크기, 레인 간격, 불투명도, 롱노트 진하기, 이동 거리와 사라지는 시간, 모양 옵션.
+- **위치 · OBS**: osu!·Qwilight 게임용 모드, 드래그 이동·위치 자동 저장, 좌표와 크기, 10% 축소·확대, 현재 모니터 중앙 배치, 마우스 클릭 통과, 항상 위, 위치 확인용 배경.
+- **모양 · 움직임**: Classic/Neon/Minimal, 노트 크기, 레인 간격 슬라이더·숫자 입력, 불투명도, 롱노트 진하기, 이동 거리와 사라지는 시간, 모양 옵션.
 - **난이도**: 최근 입력의 추정 점수와 세부 지표, 분석 켜기/끄기, OBS 표시, 분석 초기화.
 - **키 색상**: 키별 색상 선택·HEX 입력, 불투명도 0~100%, 미리보기, 선택 키 기본값.
 - **osu! 연동**: 위험 안내 확인 후 이번 실행에서만 선곡 읽기 켜기, 즉시 끄기, Songs 폴더 지정. 매 실행 기본 OFF.
@@ -127,6 +134,12 @@ Use `run_cpp_overlay.bat` to start the new build from the repository directory a
 
 **위치 · OBS → 마우스로 위치 이동** 또는 트레이의 이동 메뉴를 켜고 오버레이를 잡아 끌면 놓은 좌표를 자동 저장합니다. 끝나면 이동 모드를 꺼서 원래 클릭 통과·배경으로 돌아갑니다. X/Y를 입력하고 **위치 저장**을 눌러도 됩니다. 다음 실행에 마지막 저장 위치로 복원하며, 다른 미저장 설정은 건드리지 않습니다. 화면 밖이면 **이 모니터 중앙으로 → 위치 저장**을 사용하세요. [동작과 검증](docs/overlay-position.md)
 
+### 크기와 간격 빠르게 조절
+
+**위치 · OBS → 10% 축소 / 10% 확대**를 누르면 현재 편집 중인 창 크기·노트 너비/높이·이동 거리를 함께 조절합니다. 여러 번 눌러 원하는 크기에 맞춘 뒤 **적용 + 테스트 → 적용 + 저장**하세요. 위치·키 배치·레인 간격은 그대로이며, 레벨 글자는 별도로 크게 유지합니다. 각 항목의 최소·최대값에서는 조절이 멈추고, 축소 시 HUD 아래에 노트 한 개가 들어갈 높이를 남깁니다. 픽셀 단위 직접 입력도 가능합니다.
+
+**모양 · 움직임 → 레인 간격**은 슬라이더나 숫자로 50~160% 범위에서 조절합니다. 왼쪽은 좁게, 오른쪽은 넓게이며, 방향키는 1씩·Page Up/Down은 5씩 조절합니다. 숫자와 슬라이더는 함께 갱신됩니다. 크기와 간격 모두 적용 전에는 편집 상태이며, **저장 상태로 되돌리기**로 복원할 수 있습니다.
+
 ### 트레이
 
 실행 중 Windows 알림 영역에 **Key Note Overlay** 아이콘을 표시합니다. Windows 설정에 따라 숨겨진 아이콘 메뉴 안에 있을 수 있습니다. 아이콘을 클릭하면 설정 창을 열거나 최소화 상태에서 복원하고, 우클릭하면 **설정 열기 / 오버레이 마우스로 이동 / 종료** 메뉴가 나옵니다. 닫기 버튼은 앱 전체 종료이며, 설정 창을 최소화해도 오버레이와 트레이는 계속 동작합니다.
@@ -153,6 +166,8 @@ v2.12는 **에리팩 실제 ⑤1~10에서 약 +1로 표시된다**는 피드백�
 
 v2.12는 코스 화면과 원본 해시를 대조한 **64개 채보로 Revive 16코스**의 기준점을 계산했습니다. strain에 키 조합 변화·리듬 간격 변화·반복 부담을 더하는 기존 특징식은 유지했습니다. 현재·완료 결과·새 리포트에 같은 기준을 사용하며, 실행할 때 채보 폴더는 필요하지 않습니다. 16단계가 각각 구분되지만 실제 연주 정확도나 단위 합격을 검증한 결과는 아닙니다. [기준표·계산·한계](docs/revive10-reference.md)
 
+**분석 키 수 선택:** 난이도 탭에서 `등록 키 수 (기존)` / `자동 추정 · 세션 고정` / `4K~10K 수동 고정`을 선택하고 적용할 수 있습니다. 등록 배치는 유지하며, 사용 키가 확정되면 미사용 레인을 접고 창 폭만 줄입니다. 각 레인·노트의 크기는 유지합니다. 자동은 최소 8초·32회 입력, 관측 키마다 2회 이상, 새 키 없이 3초가 지난 뒤 관측 키 수를 고정합니다. 일부 키를 잠깐 안 쳐도 줄이지 않으며, 고정 수보다 많은 키가 들어오면 `키 수 확인`으로 보류합니다. 10초 무입력 뒤 새 연주 또는 분석 초기화로 다시 추정합니다. 게임의 실제 키 모드를 확정하는 기능은 아니므로 확실한 경우 수동 고정을 사용하세요. 6K·9K는 기존 입력 지수입니다. Revive CPP는 1~18K에 적용합니다. 실시간은 5개 누름 특징과 홀드 미확인(`—`), 원본 선택 채보는 실제 롱노트를 포함한 6개 특징을 표시합니다. 1~3K·11~18K는 직접 키를 등록하고 `등록 키 수 (기존)`을 선택하세요. 큰 배치의 일부 키를 수동/자동 4~10K로 쓰면 해당 수의 레인이 확인된 뒤 등록 순서로 대응하며 추가 레인 입력 시 보류합니다. [상세 동작](docs/analysis-key-mode.md)
+
 단위의 높낮이는 **7단 low → 7단 mid low → 7단 수준 → 7단 high**처럼 표시합니다. 현재 분석과 지난 결과에 같은 표현을 쓰며, 비교 기준과 원래 strain ★ 값은 세부 지표에 남깁니다. 입력 부담이 비슷해 분리되지 않는 인접 단계는 `8~9단`처럼 범위로 표시합니다. 기준 최저 미만/최고 초과에는 `↓/↑`를 붙이고 높낮이를 세분하지 않습니다.
 
 큰 NPS는 **최근 1초**, 난이도는 **최근 8초** 기준입니다. 8초 평균 NPS, 2초 순간 밀도, 동시치기, 같은 키 연타, 홀드 중 추가 입력도 설정 창에서 볼 수 있습니다.
@@ -161,7 +176,7 @@ v2.5에서는 **롱노트로 추가되는 홀드 간섭·릴리즈 부담을 기
 
 - 처음에는 입력을 모으는 동안 **분석 중**으로 표시합니다. 단발 입력이나 한 번의 동시치기만으로 등급을 매기지 않습니다.
 - 모든 키를 뗀 뒤 마지막 유효한 누름/뗌부터 **10초간 입력이 없을 때** 측정을 끝냅니다. 짧게 쉬거나 다시 입력을 모으는 동안에는 **마지막 추정값 유지**를 표시하고 같은 세션으로 이어갑니다. NPS와 입력 통계는 실제 최근 입력대로 갱신됩니다.
-- 측정이 끝나면 분석과 NPS 사이에 **아까 쳤던 패턴은: 7단 mid low 난이도입니다.**처럼 결과를 표시합니다. 해당 입력 세션의 유효한 최고 8초 구간 추정치를 남기며, 대기하거나 다음 패턴을 치는 중에도 다음 결과가 확정될 때까지 유지합니다. 표본 부족·버퍼 초과 세션은 이전 결과를 덮지 않습니다.
+- 측정이 끝나면 분석과 NPS 사이의 **완료된 패턴 · 측정 레벨**에 **7단 mid low**처럼 결과 값만 크게 표시합니다. 실시간·완료 레벨은 설정과 넓은 HUD에서 최대 48px 굵은 글씨이며, 긴 단명은 영역의 너비와 높이에 맞게 줄입니다. 해당 입력 세션의 유효한 최고 8초 구간 추정치를 남기며, 대기하거나 다음 패턴을 치는 중에도 다음 결과가 확정될 때까지 유지합니다. 표본 부족·버퍼 초과 세션은 이전 결과를 덮지 않습니다.
 - **분석 초기화**, 키 배치 변경, 분석 켜기/끄기, 키 등록은 화면의 지난 결과도 지웁니다. 결과는 설정 파일에는 기록하지 않습니다. 리포트 자동 저장을 켰다면 진행 중 기록을 별도 HTML로 마무리합니다.
 - **OBS 오버레이에도 표시**를 끄고 적용하면 설정 창에서만 볼 수 있습니다. **입력 난이도 분석 사용**을 끄고 적용하면 집계도 멈춥니다.
 - **분석 초기화**로 새 구간을 시작할 수 있습니다. 키 배치를 바꾸거나 키 등록을 시작할 때도 초기화합니다.

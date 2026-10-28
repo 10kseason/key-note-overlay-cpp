@@ -50,6 +50,14 @@ int main(int argc, char** argv) {
     check("offline_document", html.find("<script") == std::string::npos && html.find("https://") == std::string::npos && html.find("default-src 'none'") != std::string::npos);
     check("three_graphs_and_summary", html.find("시간별 NPS") != std::string::npos && html.find("시간별 추정 난이도") != std::string::npos && html.find("레인별 타건 흐름") != std::string::npos && html.find("단위 합격") != std::string::npos);
     auto escaped = report::RenderHtml(shortSession);
+    auto remapped = session;
+    remapped.peak.snapshot.analysisKeys = 4;
+    remapped.peak.snapshot.profile = pattern::RatingProfile::Osu4;
+    const auto remappedHtml = report::RenderHtml(remapped);
+    check("report_distinguishes_registered_and_analysis_keys", remappedHtml.find("등록 배치 10키 · 난이도 분석 기준 4K") != std::string::npos &&
+        remappedHtml.find("10K Revive 2026 기준 v2.12") == std::string::npos);
+    remapped.analysisKeyConflict = true;
+    check("report_explains_key_count_conflict", report::RenderHtml(remapped).find("고정한 분석 키 수보다 많은 키") != std::string::npos);
     check("metadata_is_html_escaped", escaped.find("&lt;test&gt; &amp; &quot;fixture&quot;") != std::string::npos && escaped.find("<test>") == std::string::npos);
     report::Recorder aeryRecorder;
     pattern::DifficultyEstimator aeryEstimator(5);

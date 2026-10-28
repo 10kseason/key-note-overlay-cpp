@@ -1,4 +1,5 @@
 #pragma once
+#include "revive_auxiliary.h"
 #include <atomic>
 #include <condition_variable>
 #include <filesystem>
@@ -12,7 +13,9 @@ struct View {
     bool enabled = false, ready = false;
     int keys = 0;
     std::wstring status = L"OFF · 앱을 시작할 때마다 꺼져 있습니다.";
-    std::wstring title, variant, difficulty, details;
+    std::wstring title, variant, difficulty, details, reviveAuxiliary, reviveCompact, reviveSkills;
+    revive_aux::Summary revive;
+    std::wstring lnDifficulty;
 };
 // Only relative single directory/file names from a verified beatmap object are
 // accepted. A game-provided string must never select an arbitrary local file.

@@ -3,6 +3,7 @@
 #include <commdlg.h>
 #include <shellapi.h>
 #include "analysis.h"
+#include "dan_rating.h"
 #include <algorithm>
 #include <atomic>
 #include <fstream>
@@ -38,7 +39,7 @@ void Text(HDC dc, const std::wstring& text, RECT rect, HFONT font, COLORREF colo
 void Panel(HDC dc, RECT rect) { HBRUSH brush=CreateSolidBrush(Card); FillRect(dc,&rect,brush); DeleteObject(brush); }
 void DrawGraph(HDC dc, RECT rect, bool difficulty) {
     Panel(dc,rect);
-    Text(dc,difficulty?L"난이도 비교값 · 마우스를 올리면 단위 표시":L"1초 NPS · 2초 간격 표본",{rect.left+16,rect.top+6,rect.right-12,rect.top+34},smallFont,Muted);
+    Text(dc,difficulty?L"난이도 비교값 · 마우스를 올리면 단위 표시":L"1초 NPS · 0.1초 간격 표본",{rect.left+16,rect.top+6,rect.right-12,rect.top+34},smallFont,Muted);
     const RECT plot{rect.left+48,rect.top+44,rect.right-18,rect.bottom-24};
     double maximum=1;
     if (analysis) for (const auto& point:analysis->points)
@@ -80,7 +81,12 @@ void Paint(HDC dc, int width, int height) {
     Text(dc,subtitle,{29,164,width-28,189},smallFont,Muted);
     Panel(dc,{28,198,width-28,265});
     Text(dc,analysis?chartcalc::DifficultyLabel(analysis->summary):L"분석 대기",{44,205,width/2,244},metricFont,Cyan);
-    Text(dc,analysis?L"가장 강한 "+std::to_wstring(analysis->strongestWindows)+L"개 구간 평균 · "+chartcalc::Basis(analysis->chart.keys):L"최근 8초 창을 2초 간격으로 비교합니다.",{44,240,width-40,263},smallFont,Muted);
+    std::wstring basis = analysis ? L"실시간 방식의 최고 구간 · " + chartcalc::Basis(analysis->chart.keys) : L"최근 최대 8초 창을 실시간과 같은 방식으로 비교합니다.";
+    if (analysis && analysis->holdWeight == pattern::DefaultHoldWeight) {
+        const auto ln = pattern::FormatLnDan(analysis->summary);
+        if (!ln.empty()) basis += L" · 4K LN v2: " + ln;
+    }
+    Text(dc,basis,{44,240,width-40,263},smallFont,Muted);
     if (analysis) {
         const auto& a=*analysis;
         std::wstring metrics=std::to_wstring(a.chart.notes.size())+L" 노트   "+chartcalc::Number(a.durationMs/1000)+L"초   최대 NPS "+chartcalc::Number(a.maximumNps,0);
@@ -283,7 +289,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int show) {
         };
         Start(fixture);
         const bool controlsDisabled=busy && !IsWindowEnabled(openButton) && !IsWindowEnabled(saveButton) && !IsWindowEnabled(modeBox);
-        bool ok=waitForAnalysis() && analysis && !analysis->points.empty() && analysis->summary.ready && analysis->strongestWindows==3;
+        bool ok=waitForAnalysis() && analysis && !analysis->points.empty() && analysis->summary.ready;
         ok=ok && analysis->holdWeight==pattern::DefaultHoldWeight && IsWindowEnabled(saveButton) && IsWindowEnabled(openButton);
         SendMessageW(modeBox,CB_SETCURSEL,1,0);
         SendMessageW(hwnd,WM_COMMAND,MAKEWPARAM(ModeId,CBN_SELCHANGE),reinterpret_cast<LPARAM>(modeBox));

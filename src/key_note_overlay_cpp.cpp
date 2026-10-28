@@ -18,12 +18,18 @@
 #include <shlobj.h>
 #include "alpha_surface.h"
 #include "pattern_difficulty.h"
+#include "analysis_key_mode.h"
+#include "lane_display.h"
 #include "dan_rating.h"
 #include "session_report.h"
 #include "game_overlay.h"
 #include "self_test_io.h"
 #include "window_placement.h"
+#include "revive_live.h"
+#include "revive_hud_layout.h"
+#if KEYNOTE_OSU_MEMORY_LINK
 #include "osu_link.h"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -126,6 +132,12 @@ constexpr int IDC_OSU_TITLE = 1071;
 constexpr int IDC_OSU_RATING = 1072;
 constexpr int IDC_OSU_DETAILS = 1073;
 constexpr int IDC_OSU_FOLDER = 1074;
+constexpr int IDC_ANALYSIS_KEYS = 1075;
+constexpr int IDC_SIZE_SMALLER = 1076;
+constexpr int IDC_SIZE_LARGER = 1077;
+constexpr int IDC_SPACING_SLIDER = 1078;
+constexpr int IDC_OSU_REVIVE = 1079;
+constexpr int IDC_OSU_SKILLS = 1080;
 
 constexpr double kHoldThresholdMs = 90.0;
 constexpr double kChordAlignWindowMs = 15.0;
@@ -170,6 +182,7 @@ struct Config {
     bool keyTextBottom = true;
     bool difficultyEnabled = true;
     bool difficultyHud = true;
+    int analysisKeyMode = 0; // 0=registered, -1=auto session lock, 4..10=manual
     bool reportAutoSave = false; // Local input timing persistence is explicitly opt-in.
     bool gameOverlay = false;
     std::wstring lanesText = L"A,S,D,F,J,K,L,SEMICOLON";
@@ -212,6 +225,8 @@ HFONT gGuiFont = nullptr;
 HFONT gNoteFont = nullptr;
 HFONT gKeyFont = nullptr;
 HFONT gHudValueFont = nullptr;
+HFONT gHudMediumFont = nullptr;
+HFONT gHudCompactFont = nullptr;
 HFONT gHudSmallFont = nullptr;
 HFONT gHudLabelFont = nullptr;
 HFONT gOsuWarningFont = nullptr;
@@ -241,15 +256,21 @@ auto gExitMessageBox = &MessageBoxW;
 auto gTrackTrayMenu = &TrackPopupMenu;
 int gBuildingPage = -1;
 int gCurrentPage = 0;
+#if KEYNOTE_OSU_MEMORY_LINK
 std::array<std::vector<HWND>, 6> gPageControls;
 osu_link::Session gOsuLink;
 osu_link::View gOsuView;
 std::filesystem::path gOsuSongsOverride;
 auto gOsuRiskMessageBox = &MessageBoxW;
+#else
+std::array<std::vector<HWND>, 5> gPageControls;
+#endif
 pattern::DifficultyEstimator gDifficulty;
+pattern::AnalysisKeySelector gAnalysisKeys;
 pattern::Snapshot gDifficultySnapshot;
 pattern::PatternSummary gPatternSummary;
 pattern::LiveContinuity gLiveContinuity;
+revive_live::Meter gReviveLive;
 report::Recorder gReportRecorder;
 std::deque<report::Session> gPendingReports;
 std::future<report::SaveResult> gReportWrite;
@@ -292,6 +313,7 @@ void FinishOverlayMove(HWND hwnd);
 void FinishSessionReport(const std::string& reason, double nowMs);
 void PollReportWrites(bool wait = false);
 void UpdateGameOverlay(double nowMs);
+int OverlayPresentationHeight(int width);
 
 bool AddTrayIcon() {
     if (gShuttingDown || !IsWindow(gSettingsWnd)) return false;
@@ -419,8 +441,38 @@ void ResetDifficulty(int lanes) {
     FinishSessionReport("분석 초기화 / 설정 변경", NowMs());
     gReportWaitForFreshSession = false;
     gDifficulty.Reset(lanes);
+    gAnalysisKeys.Reset(lanes, gConfig.analysisKeyMode);
     gPatternSummary.Reset();
     gLiveContinuity.Reset();
+    gReviveLive.Reset(lanes);
+}
+
+pattern::Snapshot EvaluateLiveDifficulty(double nowMs) {
+    gAnalysisKeys.Update(nowMs);
+    gDifficulty.SetAnalysisKeys(gConfig.analysisKeyMode == 0 ? 0 : gAnalysisKeys.Keys());
+    auto raw = gDifficulty.Evaluate(nowMs, true);
+    raw.keyModePending = gAnalysisKeys.Pending();
+    raw.keyModeConflict = raw.keyModeConflict || gAnalysisKeys.Conflict();
+    if (raw.keyModePending || raw.keyModeConflict) raw.ready = false;
+    return gLiveContinuity.Update(raw, nowMs);
+}
+
+overlay::LaneDisplay CurrentLaneDisplay(int fullWidth) {
+    return overlay::MakeLaneDisplay(static_cast<int>(gConfig.lanes.size()), fullWidth,
+        gConfig.laneSpacingPercent, gAnalysisKeys,
+        gConfig.difficultyEnabled && gConfig.analysisKeyMode != 0 && gCaptureMode == CaptureMode::None);
+}
+
+void SyncOverlayDisplayWidth(HWND hwnd) {
+    if (!hwnd) return;
+    RECT client{};
+    if (!GetClientRect(hwnd, &client)) return;
+    const int width = CurrentLaneDisplay(gConfig.width).width;
+    const int height = OverlayPresentationHeight(width);
+    if (client.right == width && client.bottom == height) return;
+    // Temporary presentation dimensions never overwrite the saved size.
+    if (SetWindowPos(hwnd, nullptr, 0, 0, width, height,
+        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE)) InvalidateRect(hwnd, nullptr, FALSE);
 }
 
 int ClampInt(int value, int minValue, int maxValue) {
@@ -982,7 +1034,7 @@ bool SameConfig(const Config& a, const Config& b) {
         return std::tie(c.x, c.y, c.width, c.height, c.durationMs, c.travelPx, c.noteWidth, c.noteHeight,
             c.opacityPercent, c.laneSpacingPercent, c.longNoteAlpha, c.visualPreset, c.debugBackground,
             c.clickThrough, c.alwaysOnTop, c.circleNotes, c.laneBackground, c.roundedBoxes, c.thinOutline,
-            c.keyTextBottom, c.difficultyEnabled, c.difficultyHud, c.reportAutoSave, c.gameOverlay, c.lanesText, c.presetLanes, c.keyStyles);
+            c.keyTextBottom, c.difficultyEnabled, c.difficultyHud, c.analysisKeyMode, c.reportAutoSave, c.gameOverlay, c.lanesText, c.presetLanes, c.keyStyles);
     };
     return values(a) == values(b);
 }
@@ -1110,6 +1162,7 @@ void LoadIniConfig() {
     gConfig.keyTextBottom = ReadIniBool(L"overlay", L"key_text_bottom", gConfig.keyTextBottom);
     gConfig.difficultyEnabled = ReadIniBool(L"overlay", L"difficulty_enabled", gConfig.difficultyEnabled);
     gConfig.difficultyHud = ReadIniBool(L"overlay", L"difficulty_hud", gConfig.difficultyHud);
+    gConfig.analysisKeyMode = pattern::NormalizeAnalysisKeyMode(ReadIniInt(L"overlay", L"analysis_key_mode", gConfig.analysisKeyMode));
     gConfig.reportAutoSave = ReadIniBool(L"overlay", L"report_auto_save", gConfig.reportAutoSave);
     gConfig.gameOverlay = ReadIniBool(L"overlay", L"game_overlay", gConfig.gameOverlay);
     gConfig.mode = ReadIniString(L"input", L"mode", gConfig.mode.c_str());
@@ -1188,6 +1241,7 @@ bool LoadJsonConfig() {
     if (JsonReadBool(json, "key_text_bottom", boolValue)) gConfig.keyTextBottom = boolValue;
     if (JsonReadBool(json, "difficulty_enabled", boolValue)) gConfig.difficultyEnabled = boolValue;
     if (JsonReadBool(json, "difficulty_hud", boolValue)) gConfig.difficultyHud = boolValue;
+    if (JsonReadInt(json, "analysis_key_mode", intValue)) gConfig.analysisKeyMode = pattern::NormalizeAnalysisKeyMode(intValue);
     if (JsonReadBool(json, "report_auto_save", boolValue)) gConfig.reportAutoSave = boolValue;
     if (JsonReadBool(json, "game_overlay", boolValue)) gConfig.gameOverlay = boolValue;
     if (JsonReadString(json, "mode", stringValue)) gConfig.mode = WidenAscii(stringValue);
@@ -1248,6 +1302,7 @@ bool SaveIniConfig() {
     field("rounded_boxes", gConfig.roundedBoxes); field("thin_outline", gConfig.thinOutline);
     field("key_text_bottom", gConfig.keyTextBottom);
     field("difficulty_enabled", gConfig.difficultyEnabled); field("difficulty_hud", gConfig.difficultyHud);
+    field("analysis_key_mode", gConfig.analysisKeyMode);
     field("report_auto_save", gConfig.reportAutoSave);
     field("game_overlay", gConfig.gameOverlay);
     out << "\r\n[input]\r\n";
@@ -1300,6 +1355,7 @@ bool SaveJsonConfig() {
     out << "    \"key_text_bottom\": " << BoolText(gConfig.keyTextBottom) << ",\n";
     out << "    \"difficulty_enabled\": " << BoolText(gConfig.difficultyEnabled) << ",\n";
     out << "    \"difficulty_hud\": " << BoolText(gConfig.difficultyHud) << ",\n";
+    out << "    \"analysis_key_mode\": " << gConfig.analysisKeyMode << ",\n";
     out << "    \"report_auto_save\": " << BoolText(gConfig.reportAutoSave) << ",\n";
     out << "    \"game_overlay\": " << BoolText(gConfig.gameOverlay) << "\n";
     out << "  },\n";
@@ -1363,13 +1419,15 @@ std::wstring WindowText(HWND hwnd) {
 }
 
 std::wstring DifficultyProfileName() {
-    switch (pattern::ProfileForKeys(static_cast<int>(gConfig.lanes.size()))) {
+    if (gConfig.analysisKeyMode == -1 && gAnalysisKeys.Pending()) return L"자동 키 수 추정";
+    const int keys = gConfig.analysisKeyMode == 0 ? static_cast<int>(gConfig.lanes.size()) : gAnalysisKeys.Keys();
+    switch (pattern::ProfileForKeys(keys)) {
     case pattern::RatingProfile::Osu4: return L"Reform 4K";
     case pattern::RatingProfile::Osu7: return L"Jinjin 7K";
     case pattern::RatingProfile::Osu8: return L"Regular 8K";
     case pattern::RatingProfile::Osu10: return L"Revive 10K";
     case pattern::RatingProfile::Aery5: return L"AERY 5K";
-    default: return L"입력 지수";
+    default: return std::to_wstring(keys) + L"K 입력 지수";
     }
 }
 
@@ -1391,16 +1449,15 @@ std::wstring DifficultyValue() {
     if (!gConfig.difficultyEnabled || gCaptureMode != CaptureMode::None) return L"정지";
     if (gDifficultySnapshot.limited) return L"보류";
     if (gDifficultySnapshot.idle) return L"대기";
+    if (gDifficultySnapshot.keyModeConflict) return L"키 수 확인";
+    if (gDifficultySnapshot.keyModePending) return L"키 추정 중";
     if (!gDifficultySnapshot.ready) return L"분석 중";
     return FormatDifficultyRating(gDifficultySnapshot);
 }
 
 std::wstring PreviousPatternValue() {
     const auto& completed = gPatternSummary.Completed();
-    if (!completed.ready) return L"측정이 끝나면 표시됩니다.";
-    const auto dan = pattern::EstimateDan(completed);
-    return FormatDifficultyRating(completed) + (dan.available && dan.outside == 0 && dan.height == pattern::DanHeight::Level ?
-        L"의 난이도입니다." : L" 난이도입니다.");
+    return completed.ready ? FormatDifficultyRating(completed) : L"측정 전";
 }
 
 void EnsureHudFonts() {
@@ -1408,29 +1465,34 @@ void EnsureHudFonts() {
         return CreateFontW(size, 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Malgun Gothic");
     };
-    if (!gHudValueFont) gHudValueFont = make(38, FW_BOLD);
+    if (!gHudValueFont) gHudValueFont = make(48, FW_BOLD);
+    if (!gHudMediumFont) gHudMediumFont = make(32, FW_BOLD);
+    if (!gHudCompactFont) gHudCompactFont = make(26, FW_BOLD);
     if (!gHudSmallFont) gHudSmallFont = make(22, FW_BOLD);
     if (!gHudLabelFont) gHudLabelFont = make(13, FW_NORMAL);
     if (!gOsuWarningFont) gOsuWarningFont = make(28, FW_BOLD);
 }
 
 void DestroyHudFonts() {
-    for (HFONT* font : {&gHudValueFont, &gHudSmallFont, &gHudLabelFont, &gOsuWarningFont}) {
+    for (HFONT* font : {&gHudValueFont, &gHudMediumFont, &gHudCompactFont, &gHudSmallFont, &gHudLabelFont, &gOsuWarningFont}) {
         if (*font) DeleteObject(*font);
         *font = nullptr;
     }
 }
 
-HFONT FitDifficultyFont(HDC dc, const std::wstring& text, int width, HFONT preferred) {
+HFONT FitDifficultyFont(HDC dc, const std::wstring& text, int width, HFONT preferred, int height = 1000) {
     HGDIOBJ old = SelectObject(dc, preferred);
     HFONT chosen = preferred;
-    for (HFONT font : {preferred, gHudSmallFont, gGuiFont, gHudLabelFont}) {
+    TEXTMETRICW preferredMetrics{};
+    GetTextMetricsW(dc, &preferredMetrics);
+    for (HFONT font : {preferred, gHudMediumFont, gHudCompactFont, gHudSmallFont, gGuiFont, gHudLabelFont}) {
         if (!font) continue;
         SelectObject(dc, font);
-        chosen = font;
         SIZE extent{};
         GetTextExtentPoint32W(dc, text.c_str(), static_cast<int>(text.size()), &extent);
-        if (extent.cx <= width) break;
+        if (extent.cy > preferredMetrics.tmHeight) continue;
+        chosen = font;
+        if (extent.cx <= width && extent.cy <= height) break;
     }
     SelectObject(dc, old);
     return chosen;
@@ -1440,7 +1502,7 @@ void SetDifficultyText(HWND control, const std::wstring& text) {
     if (!control) return;
     RECT bounds{}; GetClientRect(control, &bounds);
     HDC dc = GetDC(control);
-    HFONT font = FitDifficultyFont(dc, text, bounds.right - 2, gHudSmallFont);
+    HFONT font = FitDifficultyFont(dc, text, bounds.right - 2, gHudValueFont, bounds.bottom);
     ReleaseDC(control, dc);
     SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
     SetWindowTextW(control, text.c_str());
@@ -1453,13 +1515,20 @@ std::wstring DifficultyDetails(bool multiline) {
     if (multiline) {
         out << L"8초 평균  " << s.nps << L" NPS     |     순간 밀도  " << s.burstNps << L" NPS (2초)\n"
             << L"동시치기  " << s.chordPercent << L" %     |     최대 " << s.maxChord << L"키 동시\n"
-            << L"같은 키 연타  " << s.jackPercent << L" %\n"
+            << L"같은 키 연타  " << s.jackPercent << L" %";
+        const auto ln = pattern::FormatLnDan(s);
+        if (!ln.empty()) out << L"     |     4K LN v2 비교: " << ln;
+        out << L"\n"
             << L"홀드 중 추가 입력  " << s.holdOverlapPercent << L" %\n"
             << L"최근 8초 입력  " << s.samples << L"회     |     누르고 있는 키  " << s.heldKeys << L"개";
-        if (s.retained) out << L"\n입력 연결 대기 · 마지막 추정 유지 (10초 무입력 시 결과 확정)";
+        if (s.keyModeConflict) out << L"\n고정 수보다 많은 키 감지 · 분석 초기화 또는 키 수 설정 변경";
+        else if (s.keyModePending) out << L"\n자동 추정: " << gAnalysisKeys.Observed() << L"키 관측 · 8초/32회/키별 2회 필요";
+        else if (gConfig.analysisKeyMode != 0) out << L"\n" << (gConfig.analysisKeyMode == -1 ? L"자동 고정 " : L"수동 고정 ")
+            << gAnalysisKeys.Keys() << L"K · 등록 배치 " << gConfig.lanes.size() << L"키 유지";
+        else if (s.retained) out << L"\n입력 연결 대기 · 마지막 추정 유지 (10초 무입력 시 결과 확정)";
         else if (s.ready && s.ratingError > 0) out << L"\n기존 오차 ±" << s.ratingError << L" · 보조·저레벨·LN 조정 전 검증값";
         const auto dan = pattern::EstimateDan(s);
-        if (s.ready && dan.available && !s.retained) {
+        if (s.ready && dan.available && !s.retained && gConfig.analysisKeyMode == 0) {
             out << L"\n기준: " << pattern::DanBasis(s.profile) << L"  |  참고 ★" << std::setprecision(2) << s.stars;
             if (s.profile == pattern::RatingProfile::Osu10) out << L"  |  패턴 " << s.rating;
             if (dan.outside != 0) out << (dan.outside < 0 ? L"  |  기준 최저 미만 ↓" : L"  |  기준 최고 초과 ↑");
@@ -1538,18 +1607,24 @@ void RefreshReportStatus() {
     EnableWindow(GetDlgItem(gSettingsWnd, IDC_REPORT_RETRY), gReportSaveFailed);
 }
 
-void RefreshOsuLinkDisplay() {
-    const auto next=gOsuLink.Current();
+#if KEYNOTE_OSU_MEMORY_LINK
+void ApplyOsuLinkView(const osu_link::View& next) {
     const bool changed=next.enabled!=gOsuView.enabled || next.ready!=gOsuView.ready || next.status!=gOsuView.status ||
-        next.title!=gOsuView.title || next.variant!=gOsuView.variant || next.keys!=gOsuView.keys || next.difficulty!=gOsuView.difficulty;
+        next.title!=gOsuView.title || next.variant!=gOsuView.variant || next.keys!=gOsuView.keys || next.difficulty!=gOsuView.difficulty ||
+        next.details!=gOsuView.details || next.reviveAuxiliary!=gOsuView.reviveAuxiliary ||
+        next.reviveCompact!=gOsuView.reviveCompact || next.reviveSkills!=gOsuView.reviveSkills || next.lnDifficulty!=gOsuView.lnDifficulty;
     gOsuView=next;
     if(!changed) return;
     SetDlgItemTextW(gSettingsWnd,IDC_OSU_STATUS,next.status.c_str());
     SetDlgItemTextW(gSettingsWnd,IDC_OSU_TITLE,next.ready?(next.title+L" ["+next.variant+L"]").c_str():L"선택 채보 대기");
     SetDlgItemTextW(gSettingsWnd,IDC_OSU_RATING,next.ready?(L"원본 "+std::to_wstring(next.keys)+L"K · 예상 "+next.difficulty).c_str():L"—");
     SetDlgItemTextW(gSettingsWnd,IDC_OSU_DETAILS,next.ready?next.details.c_str():L"");
+    SetDlgItemTextW(gSettingsWnd,IDC_OSU_REVIVE,next.ready?next.reviveAuxiliary.c_str():L"");
+    SetDlgItemTextW(gSettingsWnd,IDC_OSU_SKILLS,next.ready?next.reviveSkills.c_str():L"");
     if(gOverlayWnd) InvalidateRect(gOverlayWnd,nullptr,FALSE);
 }
+
+void RefreshOsuLinkDisplay() { ApplyOsuLinkView(gOsuLink.Current()); }
 
 void ToggleOsuLink() {
     const bool enable=SendDlgItemMessageW(gSettingsWnd,IDC_OSU_ENABLE,BM_GETCHECK,0,0)==BST_CHECKED;
@@ -1583,8 +1658,12 @@ void ChooseOsuSongs() {
     CoTaskMemFree(item);if(SUCCEEDED(initialized))CoUninitialize();
 }
 
+#endif
+
 void RefreshDifficultyDisplay(double nowMs = NowMs()) {
+#if KEYNOTE_OSU_MEMORY_LINK
     RefreshOsuLinkDisplay();
+#endif
     UpdateGameOverlay(nowMs);
     HWND headline = GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_SCORE);
     HWND metrics = GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_METRICS);
@@ -1595,7 +1674,12 @@ void RefreshDifficultyDisplay(double nowMs = NowMs()) {
     HWND previousControl = GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_PREVIOUS);
     const std::wstring oldPrevious = WindowText(previousControl);
     gDifficultySnapshot = gConfig.difficultyEnabled && gCaptureMode == CaptureMode::None ?
-        gLiveContinuity.Update(gDifficulty.Evaluate(nowMs, true), nowMs) : pattern::Snapshot{};
+        EvaluateLiveDifficulty(nowMs) : pattern::Snapshot{};
+    const auto oldSkills = revive_aux::Details(gReviveLive.Current()) + gReviveLive.Current().status;
+    gReviveLive.Update(nowMs, gConfig.difficultyEnabled && gCaptureMode == CaptureMode::None,
+        gAnalysisKeys.Keys(), gDifficultySnapshot.keyModePending, gDifficultySnapshot.keyModeConflict,
+        gDifficultySnapshot.limited);
+    const bool skillsChanged = oldSkills != revive_aux::Details(gReviveLive.Current()) + gReviveLive.Current().status;
     if (gConfig.difficultyEnabled && gCaptureMode == CaptureMode::None) gPatternSummary.Observe(gDifficultySnapshot);
     ObserveSessionReport(gDifficultySnapshot, nowMs);
     PollReportWrites();
@@ -1621,23 +1705,84 @@ void RefreshDifficultyDisplay(double nowMs = NowMs()) {
     SendDlgItemMessageW(gSettingsWnd, IDC_DIFFICULTY_BAR, PBM_SETPOS,
         gDifficultySnapshot.ready ? static_cast<WPARAM>(ClampInt(static_cast<int>(std::round(bar)), 0, 100)) : 0, 0);
     if (gOverlayWnd && gConfig.difficultyEnabled && gConfig.difficultyHud &&
-        (oldTitle != title || oldDetails != details || oldNps != nps.str() || oldPrevious != previous)) InvalidateRect(gOverlayWnd, nullptr, FALSE);
+        (skillsChanged || oldTitle != title || oldDetails != details || oldNps != nps.str() || oldPrevious != previous)) InvalidateRect(gOverlayWnd, nullptr, FALSE);
 }
 
-int DifficultyHeaderHeight(int width, int height) {
-    const int live = gConfig.difficultyEnabled && gConfig.difficultyHud ? (width < 600 || height >= 180 ? 76 : 56) : 0;
-    // A very short overlay reuses the previous-pattern card instead of covering
-    // all input lanes with another row. Never resize the user's saved window.
-    const bool extra=gOsuView.enabled && (!live || height>=live+28+30);
-    return live + (extra ? 28 : 0);
+revive_hud::Layout CurrentHudLayout(int width) {
+#if KEYNOTE_OSU_MEMORY_LINK
+    const bool selected = gOsuView.enabled;
+#else
+    constexpr bool selected = false;
+#endif
+    const bool liveLn = gDifficultySnapshot.profile == pattern::RatingProfile::Osu4;
+#if KEYNOTE_OSU_MEMORY_LINK
+    const bool selectedLn = selected && gOsuView.ready && gOsuView.keys == 4;
+#else
+    constexpr bool selectedLn = false;
+#endif
+    return revive_hud::Make(width, gConfig.difficultyEnabled && gConfig.difficultyHud, selected, liveLn, selectedLn);
+}
+
+int DifficultyHeaderHeight(int width, int /*height*/) { return CurrentHudLayout(width).total; }
+int OverlayPresentationHeight(int width) {
+    return revive_hud::PresentationHeight(gConfig.height, gConfig.noteHeight, CurrentHudLayout(width));
+}
+
+void DrawSkillGrid(HDC dc, int width, int top, const std::wstring& source,
+                   const revive_aux::Summary& skills, const revive_hud::Layout& layout) {
+    RECT panel{4, top, width - 4, top + layout.skillHeight - 1};
+    HBRUSH brush = CreateSolidBrush(RGB(10, 16, 26));
+    FillRect(dc, &panel, brush); DeleteObject(brush);
+    SetTextColor(dc, RGB(184, 207, 255));
+    RECT caption{8, top, width - 8, top + 28};
+    const auto text = source + (skills.ready ? L"" : L" · " + skills.status);
+    SelectObject(dc, FitDifficultyFont(dc,text,width-16,gHudSmallFont,28));
+    DrawTextW(dc, text.c_str(), -1, &caption, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+    // Every axis keeps its position, including zero and unavailable values.
+    // Width controls the row count; no ranking or ellipsis hides an axis.
+    for (int i = 0; i < 6; ++i) {
+        const int column = i % layout.columns, row = i / layout.columns;
+        RECT cell{4 + (width - 8) * column / layout.columns, top + 28 + row * layout.rowHeight,
+                  4 + (width - 8) * (column + 1) / layout.columns, top + 26 + (row+1) * layout.rowHeight};
+        RECT name{cell.left+4,cell.top,cell.right-4,cell.bottom};
+        RECT number=name;
+        if (layout.stackedSkills) { name.bottom=name.top+24; number.top=name.bottom; }
+        else { number.left=number.right-50; name.right=number.left; }
+        const auto skillName=revive_aux::SkillName(i), value=revive_aux::SkillValue(skills,i);
+        const bool available=revive_aux::SkillAvailable(skills,i);
+        SetTextColor(dc, available ? RGB(169, 245, 180) : RGB(151, 161, 176));
+        SelectObject(dc,gHudSmallFont);
+        DrawTextW(dc,skillName.c_str(),-1,&name,DT_CENTER|DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
+        SelectObject(dc,layout.stackedSkills?gHudMediumFont:gHudCompactFont);
+        DrawTextW(dc,value.c_str(),-1,&number,DT_CENTER|DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
+        if (available) {
+            RECT bar{cell.left + 6, cell.bottom - 1,
+                cell.left + 6 + static_cast<LONG>((cell.right - cell.left - 12) * skills.skills[i] / 100.0), cell.bottom + 1};
+            brush = CreateSolidBrush(RGB(86, 169, 130)); FillRect(dc, &bar, brush); DeleteObject(brush);
+        }
+    }
+}
+
+void DrawLnComparison(HDC dc, int width, int top, const std::wstring& value) {
+    const bool stacked=width<600;
+    RECT row{4, top, width - 4, top + (stacked?60:40)};
+    HBRUSH brush = CreateSolidBrush(RGB(10, 16, 26)); FillRect(dc, &row, brush); DeleteObject(brush);
+    SetTextColor(dc, RGB(220, 195, 255));
+    RECT caption{8,top,width-8,row.bottom}, number=caption;
+    if(stacked) {caption.bottom=top+24;number.top=caption.bottom;}
+    else {caption.right=96;number.left=100;}
+    SelectObject(dc,gHudSmallFont);
+    DrawTextW(dc,L"4K LN",-1,&caption,DT_CENTER|DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
+    const auto text=value.empty()?L"측정 대기":value.rfind(L"LN ",0)==0?value.substr(3):value;
+    SelectObject(dc,FitDifficultyFont(dc,text,number.right-number.left,gHudMediumFont,number.bottom-number.top));
+    DrawTextW(dc,text.c_str(),-1,&number,DT_CENTER|DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
 }
 
 void DrawDifficultyHud(HDC dc, int width, int headerHeight) {
     if (headerHeight == 0) return;
     EnsureHudFonts();
-    const bool selectedRow=gOsuView.enabled && headerHeight!=56 && headerHeight!=76;
-    const int liveHeight=headerHeight-(selectedRow?28:0);
-    const bool large = width >= 500 && liveHeight >= 76;
+    const auto layout = CurrentHudLayout(width);
+    const bool large = width >= 600;
     const COLORREF colors[] = {RGB(112, 229, 255), RGB(169, 245, 180), RGB(255, 222, 138)};
     std::wostringstream nps;
     nps << std::fixed << std::setprecision(1) << gDifficultySnapshot.currentNps;
@@ -1647,50 +1792,59 @@ void DrawDifficultyHud(HDC dc, int width, int headerHeight) {
         error << std::fixed << std::setprecision(1) << L" · 기존 ±" << gDifficultySnapshot.ratingError;
         label += error.str();
     }
-    const bool selectedCard=gOsuView.enabled && !selectedRow;
-    const std::wstring labels[] = {label, selectedCard?L"osu! 원본 · 1.00× 모드 미반영":L"아까 쳤던 패턴은:", L"NPS · 최근 1초"};
-    const std::wstring selectedValue=gOsuView.ready?std::to_wstring(gOsuView.keys)+L"K · 예상 "+gOsuView.difficulty:L"채보 확인 중";
-    const std::wstring values[] = {DifficultyValue(), selectedCard?selectedValue:PreviousPatternValue(), nps.str()};
+    const std::wstring labels[] = {label, L"완료된 패턴 · 측정 레벨", L"NPS · 최근 1초"};
+    const std::wstring values[] = {DifficultyValue(), PreviousPatternValue(), nps.str()};
     HGDIOBJ oldFont = SelectObject(dc, gHudLabelFont ? gHudLabelFont : gGuiFont);
     SetBkMode(dc, TRANSPARENT);
-    const int side = std::min(220, width / 4);
-    for (int i = 0; liveHeight>0 && i < 3; ++i) {
+    const int npsWidth = std::min(180, width / 5);
+    const int ratingWidth = (width - npsWidth) / 2;
+    for (int i = 0; layout.mainHeight > 0 && i < 3; ++i) {
         const bool stacked = width < 600;
-        RECT panel = stacked ? RECT{4, i == 0 ? 0 : i == 1 ? 24 : 52, width - 4, i == 0 ? 24 : i == 1 ? 52 : 76} :
-            RECT{i == 0 ? 4 : i == 1 ? side + 2 : width - side + 2, 2,
-                i == 0 ? side - 2 : i == 1 ? width - side - 2 : width - 4, liveHeight - 2};
+        RECT panel = stacked ? RECT{4, i == 0 ? 0 : i == 1 ? 30 : 60, width - 4, i == 0 ? 30 : i == 1 ? 60 : 76} :
+            RECT{i == 0 ? 4 : i == 1 ? ratingWidth + 2 : width - npsWidth + 2, 2,
+                i == 0 ? ratingWidth - 2 : i == 1 ? width - npsWidth - 2 : width - 4, layout.mainHeight - 2};
         HBRUSH brush = CreateSolidBrush(RGB(10, 16, 26));
         FillRect(dc, &panel, brush); DeleteObject(brush);
         RECT accent{panel.left, panel.bottom - (stacked ? 1 : 3), panel.right, panel.bottom};
         brush = CreateSolidBrush(colors[i]); FillRect(dc, &accent, brush); DeleteObject(brush);
         SelectObject(dc, gHudLabelFont ? gHudLabelFont : gGuiFont);
         SetTextColor(dc, RGB(209, 221, 235));
-        if (stacked && i == 1) {
-            RECT summary{panel.left + 3, panel.top, panel.right - 3, panel.bottom - 1};
-            std::wstring message = labels[i] + L"\n" + values[i];
-            SetTextColor(dc, colors[i]);
-            DrawTextW(dc, message.c_str(), -1, &summary, DT_CENTER | DT_NOPREFIX);
-            continue;
-        }
-        RECT caption = stacked ? RECT{panel.left + 4, panel.top, width - 114, panel.bottom - 1} :
+        RECT caption = stacked ? RECT{panel.left + 4, panel.top, 64, panel.bottom - 1} :
             RECT{panel.left + 4, 3, panel.right - 4, 22};
-        DrawTextW(dc, labels[i].c_str(), -1, &caption, DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
-        SelectObject(dc, large && !stacked && i != 1 ? gHudValueFont : gHudSmallFont);
+        const wchar_t* shortLabel = i == 0 ? L"실시간" : i == 1 ? L"완료" : L"NPS";
+        DrawTextW(dc, stacked ? shortLabel : labels[i].c_str(), -1, &caption,
+            DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
         SetTextColor(dc, colors[i]);
-        RECT number = stacked ? RECT{width - 112, panel.top, panel.right - 3, panel.bottom - 1} :
+        RECT number = stacked ? RECT{68, panel.top, panel.right - 3, panel.bottom - 1} :
             RECT{panel.left + 3, 20, panel.right - 3, panel.bottom - 3};
+        HFONT preferred = stacked ? (i == 2 ? gHudLabelFont : gHudCompactFont) : gHudValueFont;
         SelectObject(dc, FitDifficultyFont(dc, values[i], number.right - number.left,
-            large && !stacked && i != 1 ? gHudValueFont : gHudSmallFont));
+            preferred, number.bottom - number.top));
         DrawTextW(dc, values[i].c_str(), -1, &number, DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
     }
-    if(selectedRow) {
-        RECT row{4,liveHeight+2,width-4,headerHeight-1};
-        HBRUSH brush=CreateSolidBrush(RGB(10,16,26));FillRect(dc,&row,brush);DeleteObject(brush);
-        SelectObject(dc,gHudLabelFont);SetTextColor(dc,RGB(184,207,255));
-        const auto text=gOsuView.ready?L"osu! 원본 "+std::to_wstring(gOsuView.keys)+L"K · 예상 "+gOsuView.difficulty+
-            L" · 1.00× 모드 미반영 · "+gOsuView.title+L" ["+gOsuView.variant+L"]":L"osu! · "+gOsuView.status;
-        row.left+=4;DrawTextW(dc,text.c_str(),-1,&row,DT_LEFT|DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
+    if (layout.liveLnHeight) {
+        auto value = pattern::FormatLnDan(gDifficultySnapshot);
+        const auto previous = pattern::FormatLnDan(gPatternSummary.Completed());
+        if (width >= 600 && !previous.empty()) value += L" · 완료 " + previous;
+        DrawLnComparison(dc, width, layout.mainHeight, value);
     }
+    if (layout.mainHeight) DrawSkillGrid(dc, width, layout.mainHeight + layout.liveLnHeight,
+        L"보조지표", gReviveLive.Current(), layout);
+#if KEYNOTE_OSU_MEMORY_LINK
+    if (gOsuView.enabled) {
+        RECT row{4, layout.selectedTop, width - 4, layout.selectedTop + 18};
+        HBRUSH brush = CreateSolidBrush(RGB(10, 16, 26)); FillRect(dc, &row, brush); DeleteObject(brush);
+        SelectObject(dc, gHudLabelFont); SetTextColor(dc, RGB(184, 207, 255));
+        const auto text = gOsuView.ready ? L"osu! 원본 " + std::to_wstring(gOsuView.keys) + L"K · 예상 " + gOsuView.difficulty +
+            L" · 1.00× 모드 미반영 · " + gOsuView.title + L" [" + gOsuView.variant + L"]" : L"osu! · " + gOsuView.status;
+        row.left += 4;
+        DrawTextW(dc, text.c_str(), -1, &row, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+        auto skills = gOsuView.revive;
+        if (!gOsuView.ready) { skills = {}; skills.status = L"대기"; }
+        if (layout.selectedLnHeight) DrawLnComparison(dc, width, layout.selectedTop + 18, gOsuView.lnDifficulty);
+        DrawSkillGrid(dc, width, layout.selectedTop + 18 + layout.selectedLnHeight, L"채보 보조지표", skills, layout);
+    }
+#endif
     SelectObject(dc, oldFont);
 }
 
@@ -1712,7 +1866,7 @@ void RecordDifficultyInput(int lane, bool down, double timeMs) {
     if (down) {
         // Publish a finished session even if the UI timer was delayed until the
         // first key of the next session. The estimator may reset on this keydown.
-        const auto before = gLiveContinuity.Update(gDifficulty.Evaluate(timeMs, true), timeMs);
+        const auto before = EvaluateLiveDifficulty(timeMs);
         startsFreshSession = before.idle;
         gPatternSummary.Observe(before);
         ObserveSessionReport(before, timeMs);
@@ -1720,6 +1874,8 @@ void RecordDifficultyInput(int lane, bool down, double timeMs) {
     }
     else gDifficulty.KeyUp(lane, timeMs);
     if (wasHeld != gDifficulty.IsHeld(lane)) {
+        gReviveLive.Key(lane, down, timeMs);
+        gAnalysisKeys.Key(lane, down, timeMs);
         gLiveContinuity.RecordActivity(timeMs);
         if (gConfig.reportAutoSave) {
             if (down && !gReportRecorder.Active()) {
@@ -1730,6 +1886,13 @@ void RecordDifficultyInput(int lane, bool down, double timeMs) {
                 }
             }
             gReportRecorder.Key(lane, down, timeMs);
+        }
+        if (gAnalysisKeys.Conflict()) {
+            pattern::Snapshot invalid;
+            invalid.idle = false;
+            invalid.keyModeConflict = true;
+            gPatternSummary.Observe(invalid);
+            gReportRecorder.Observe(invalid, timeMs);
         }
     }
 }
@@ -1748,8 +1911,8 @@ void ApplyOverlayWindowStyle() {
         gConfig.gameOverlay || gConfig.alwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST,
         gConfig.x,
         gConfig.y,
-        gConfig.width,
-        gConfig.height,
+        CurrentLaneDisplay(gConfig.width).width,
+        OverlayPresentationHeight(CurrentLaneDisplay(gConfig.width).width),
         SWP_NOACTIVATE | SWP_FRAMECHANGED | (gUiSelfTest ? 0 : SWP_SHOWWINDOW)
     );
     if (IsSettingsInteraction(GetForegroundWindow())) SetSettingsForegroundBoost(true);
@@ -1767,6 +1930,8 @@ void ToggleOverlayMoveMode() {
 void ResetInputRuntimeState() {
     gReportRecorder.ReleaseAll(NowMs());
     gDifficulty.ReleaseAll(NowMs());
+    gReviveLive.ReleaseAll(NowMs());
+    gAnalysisKeys.ReleaseAll(NowMs());
     // Events posted for the old lane order must not run after a layout edit.
     if (gOverlayWnd) {
         MSG pending{};
@@ -1917,19 +2082,11 @@ bool RenderOverlay(overlay::AlphaSurface& frame, double now) {
     const int savedDc = SaveDC(mem);
     IntersectClipRect(mem, 0, contentTop, width, height);
 
-    int laneCount = static_cast<int>(gConfig.lanes.size());
-    int margin = std::max(24, width / 24);
-    int laneArea = std::max(1, width - margin * 2);
-    int laneSlotW = laneCount > 0 ? std::max(1, laneArea / laneCount) : laneArea;
-    auto laneCenterX = [&](int lane) {
-        if (laneCount <= 1) {
-            return width / 2;
-        }
-        double baseSpan = std::max(1, laneArea - laneSlotW);
-        double span = baseSpan * static_cast<double>(ClampInt(gConfig.laneSpacingPercent, 50, 160)) / 100.0;
-        double first = margin + laneArea / 2.0 - span / 2.0;
-        return static_cast<int>(std::round(first + span * static_cast<double>(lane) / static_cast<double>(laneCount - 1)));
-    };
+    auto lanes = CurrentLaneDisplay(gConfig.width);
+    if (!lanes.compact) lanes = CurrentLaneDisplay(width); // Offscreen previews keep their own canvas size.
+    const int laneCount = lanes.registered;
+    const int laneSlotW = lanes.slotWidth;
+    auto laneCenterX = [&](int lane) { return lanes.Center(lane, width); };
 
     if (gConfig.laneBackground && laneCount > 0) {
         COLORREF laneFill = BlendColor(theme.laneFill, canvasColor, theme.laneAlpha);
@@ -1938,6 +2095,7 @@ bool RenderOverlay(overlay::AlphaSurface& frame, double now) {
         HGDIOBJ oldBrush = SelectObject(mem, laneBrush);
         HGDIOBJ oldPen = SelectObject(mem, lanePen);
         for (int i = 0; i < laneCount; ++i) {
+            if (!lanes.Visible(i)) continue;
             int x = laneCenterX(i);
             int laneW = std::max(24, std::min(96, laneSlotW - 8));
             RoundRect(mem, x - laneW / 2, contentTop + 5, x + laneW / 2, height - 5, 8, 8);
@@ -1952,6 +2110,7 @@ bool RenderOverlay(overlay::AlphaSurface& frame, double now) {
         HPEN gridPen = CreatePen(PS_SOLID, 1, BlendColor(theme.laneLine, canvasColor, 118));
         HGDIOBJ oldPen = SelectObject(mem, gridPen);
         for (int i = 0; i < laneCount; ++i) {
+            if (!lanes.Visible(i)) continue;
             int x = laneCenterX(i);
             MoveToEx(mem, x, 0, nullptr);
             LineTo(mem, x, height);
@@ -1990,7 +2149,7 @@ bool RenderOverlay(overlay::AlphaSurface& frame, double now) {
 
     for (const Note& note : gNotes) {
         if (laneCount <= 0) break;
-        if (note.lane < 0 || note.lane >= laneCount || note.opacity <= 0) continue;
+        if (!lanes.Visible(note.lane) || note.opacity <= 0) continue;
         double pressAge = std::max(0.0, now - note.pressMs);
         double releaseAge = note.held ? 0.0 : std::max(0.0, now - note.releaseMs);
         double holdMs = note.held ? pressAge : std::max(0.0, note.releaseMs - note.pressMs);
@@ -2144,6 +2303,7 @@ bool PresentOverlay(HWND hwnd, const overlay::AlphaSurface& frame) {
 }
 
 void PaintOverlay(HWND hwnd) {
+    SyncOverlayDisplayWidth(hwnd);
     PAINTSTRUCT ps{};
     BeginPaint(hwnd, &ps);
     RECT client{}; GetClientRect(hwnd, &client);
@@ -2177,8 +2337,9 @@ LRESULT CALLBACK OverlayProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         EndLaneHold(static_cast<int>(wParam));
         return 0;
     case WM_TIMER:
-        if (wParam == TIMER_RENDER && !gNotes.empty()) {
-            InvalidateRect(hwnd, nullptr, FALSE);
+        if (wParam == TIMER_RENDER) {
+            SyncOverlayDisplayWidth(hwnd);
+            if (!gNotes.empty()) InvalidateRect(hwnd, nullptr, FALSE);
         }
         return 0;
     case WM_ERASEBKGND:
@@ -2365,6 +2526,7 @@ void RefreshLaneEditor() {
 void FillAppearance(const Config& config) {
     SetEditInt(gSettingsWnd, IDC_OPACITY, config.opacityPercent);
     SetEditInt(gSettingsWnd, IDC_LANE_SPACING, config.laneSpacingPercent);
+    SendDlgItemMessageW(gSettingsWnd, IDC_SPACING_SLIDER, TBM_SETPOS, TRUE, config.laneSpacingPercent);
     SetEditInt(gSettingsWnd, IDC_LONG_ALPHA, config.longNoteAlpha);
     const std::pair<int, bool> checks[] = {{IDC_CIRCLE_NOTES, config.circleNotes}, {IDC_LANE_BG, config.laneBackground},
         {IDC_ROUNDED_BOXES, config.roundedBoxes}, {IDC_THIN_OUTLINE, config.thinOutline}, {IDC_KEY_TEXT_BOTTOM, config.keyTextBottom}};
@@ -2393,6 +2555,8 @@ void FillSettingsControls(HWND hwnd) {
     SendMessageW(GetDlgItem(hwnd, IDC_TOPMOST), BM_SETCHECK, gConfig.alwaysOnTop ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(GetDlgItem(hwnd, IDC_DIFFICULTY_ENABLED), BM_SETCHECK, gConfig.difficultyEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(GetDlgItem(hwnd, IDC_DIFFICULTY_HUD), BM_SETCHECK, gConfig.difficultyHud ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendDlgItemMessageW(hwnd, IDC_ANALYSIS_KEYS, CB_SETCURSEL,
+        gConfig.analysisKeyMode == 0 ? 0 : gConfig.analysisKeyMode == -1 ? 1 : gConfig.analysisKeyMode - 2, 0);
     SendMessageW(GetDlgItem(hwnd, IDC_REPORT_AUTO), BM_SETCHECK, gConfig.reportAutoSave ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(GetDlgItem(hwnd, IDC_GAME_OVERLAY), BM_SETCHECK, gConfig.gameOverlay ? BST_CHECKED : BST_UNCHECKED, 0);
     RefreshLaneEditor();
@@ -2464,6 +2628,8 @@ bool BuildSettingsCandidate(Config& candidate, bool reportErrors) {
         {IDC_REPORT_AUTO, &candidate.reportAutoSave}, {IDC_GAME_OVERLAY, &candidate.gameOverlay}};
     for (const auto& check : checks) *check.second = SendMessageW(GetDlgItem(gSettingsWnd, check.first), BM_GETCHECK, 0, 0) == BST_CHECKED;
     candidate.visualPreset = gDraftVisualPreset;
+    const int keyChoice = static_cast<int>(SendDlgItemMessageW(gSettingsWnd, IDC_ANALYSIS_KEYS, CB_GETCURSEL, 0, 0));
+    candidate.analysisKeyMode = keyChoice == 1 ? -1 : keyChoice >= 2 && keyChoice <= 8 ? keyChoice + 2 : 0;
     return true;
 }
 
@@ -2471,7 +2637,8 @@ bool ReadSettingsControls() {
     Config candidate;
     if (!BuildSettingsCandidate(candidate, true)) return false;
     const bool resetDifficulty = candidate.lanesText != gConfig.lanesText || candidate.difficultyEnabled != gConfig.difficultyEnabled ||
-        candidate.reportAutoSave != gConfig.reportAutoSave || candidate.gameOverlay != gConfig.gameOverlay;
+        candidate.reportAutoSave != gConfig.reportAutoSave || candidate.gameOverlay != gConfig.gameOverlay ||
+        candidate.analysisKeyMode != gConfig.analysisKeyMode;
     if (resetDifficulty) FinishSessionReport("분석 / 저장 설정 변경", NowMs());
     gConfig = candidate;
     RebuildLaneConfig();
@@ -2684,6 +2851,31 @@ void CenterOverlayDraft() {
     SetStatus(L"이 설정 창이 있는 모니터의 중앙 위치를 입력했어요. 적용을 눌러 주세요.");
 }
 
+void ResizeOverlayDraft(double factor) {
+    Config draft;
+    if (!BuildSettingsCandidate(draft, true)) return;
+    auto scaled = [factor](int value, int minimum, int maximum) {
+        return ClampInt(static_cast<int>(std::round(value * factor)), minimum, maximum);
+    };
+    const int noteWidth = scaled(draft.noteWidth, 24, 220);
+    const int noteHeight = scaled(draft.noteHeight, 18, 140);
+    const int effectiveHeight = draft.circleNotes ? std::min(noteWidth, std::max(noteHeight, 42)) : noteHeight;
+    // HUD typography stays independent of note scaling. Keep a complete note
+    // below it, including the optional selected-chart row, at the small limit.
+    int reserved = draft.difficultyEnabled && draft.difficultyHud ? 76 : 0;
+#if KEYNOTE_OSU_MEMORY_LINK
+    if (gOsuView.enabled) reserved += 28;
+#endif
+    int height = scaled(draft.height, std::max(90, reserved + effectiveHeight + 16), 4000);
+    if (factor < 1.0) height = std::min(height, draft.height);
+    SetEditInt(gSettingsWnd, IDC_WIDTH, scaled(draft.width, 240, 10000));
+    SetEditInt(gSettingsWnd, IDC_HEIGHT, height);
+    SetEditInt(gSettingsWnd, IDC_NOTE_WIDTH, noteWidth);
+    SetEditInt(gSettingsWnd, IDC_NOTE_HEIGHT, noteHeight);
+    SetEditInt(gSettingsWnd, IDC_TRAVEL, scaled(draft.travelPx, 40, 4000));
+    SetStatus(L"창·노트·이동 거리를 함께 조절했어요. 레벨 글자는 유지됩니다. [적용 + 테스트]로 확인하세요.");
+}
+
 HFONT CreateSettingsFont() {
     HFONT font = CreateFontW(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Malgun Gothic");
@@ -2704,7 +2896,10 @@ void ShutdownApplication() {
     if (gShuttingDown) return;
     gShuttingDown = true;
     gAppRunning = false;
+    gReviveLive.Stop();
+#if KEYNOTE_OSU_MEMORY_LINK
     gOsuLink.Stop();gOsuView={};
+#endif
     // Delete the shell icon while its callback HWND still exists. All normal
     // exits, partial startup failures and message-loop exits share this path.
     RemoveTrayIcon();
@@ -2760,7 +2955,11 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         MakeLabel(hwnd, L"Key Note Overlay  ·  설정", 18, 14, 680, 26);
         HWND tabs = TrackControl(CreateWindowW(WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS,
             18, 50, 684, 430, hwnd, reinterpret_cast<HMENU>(IDC_TABS), gInstance, nullptr));
-        const wchar_t* titles[] = {L"키 배치", L"위치 · OBS", L"모양 · 움직임", L"난이도", L"키 색상", L"osu! 연동"};
+        const wchar_t* titles[] = {L"키 배치", L"위치 · OBS", L"모양 · 움직임", L"난이도", L"키 색상"
+#if KEYNOTE_OSU_MEMORY_LINK
+            , L"osu! 연동"
+#endif
+        };
         for (int i = 0; i < static_cast<int>(gPageControls.size()); ++i) {
             TCITEMW item{}; item.mask = TCIF_TEXT; item.pszText = const_cast<wchar_t*>(titles[i]);
             TabCtrl_InsertItem(tabs, i, &item);
@@ -2796,6 +2995,9 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         MakeButton(hwnd, IDC_MOVE_MODE, L"마우스로 위치 이동", 38, 174, 200, 30);
         MakeButton(hwnd, IDC_SAVE_POSITION, L"위치 저장", 248, 174, 160, 30);
         MakeLabel(hwnd, L"오버레이 크기 (px)", 38, 218, 220, 24);
+        MakeButton(hwnd, IDC_SIZE_SMALLER, L"10% 축소", 430, 214, 110, 30);
+        MakeButton(hwnd, IDC_SIZE_LARGER, L"10% 확대", 552, 214, 110, 30);
+        MakeLabel(hwnd, L"창·노트 함께 조절\n레벨 글자 크기는 유지", 430, 252, 232, 40);
         MakeLabel(hwnd, L"가로", 38, 258, 50, 24); MakeEdit(hwnd, IDC_WIDTH, L"", 96, 254, 110, 26);
         MakeLabel(hwnd, L"세로", 242, 258, 50, 24); MakeEdit(hwnd, IDC_HEIGHT, L"", 300, 254, 110, 26);
         MakeButton(hwnd, IDC_CLICK_THROUGH, L"마우스 클릭을 뒤쪽 창으로 통과", 38, 300, 420, 26, BS_AUTOCHECKBOX);
@@ -2813,10 +3015,15 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         MakeLabel(hwnd, L"노트 너비 (24~220)", 38, 150, 185, 24); MakeEdit(hwnd, IDC_NOTE_WIDTH, L"", 236, 146, 76, 26);
         MakeLabel(hwnd, L"노트 높이 (18~140)", 348, 150, 185, 24); MakeEdit(hwnd, IDC_NOTE_HEIGHT, L"", 554, 146, 90, 26);
         MakeLabel(hwnd, L"레인 간격 % (50~160)", 38, 192, 195, 24); MakeEdit(hwnd, IDC_LANE_SPACING, L"", 236, 188, 76, 26);
-        MakeLabel(hwnd, L"불투명도 % (20~100)", 348, 192, 200, 24); MakeEdit(hwnd, IDC_OPACITY, L"", 554, 188, 90, 26);
+        HWND spacing = TrackControl(CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_AUTOTICKS,
+            338, 184, 316, 34, hwnd, reinterpret_cast<HMENU>(IDC_SPACING_SLIDER), gInstance, nullptr));
+        SendMessageW(spacing, TBM_SETRANGE, TRUE, MAKELPARAM(50, 160));
+        SendMessageW(spacing, TBM_SETTICFREQ, 10, 0);
+        SendMessageW(spacing, TBM_SETPAGESIZE, 0, 5);
         MakeLabel(hwnd, L"사라지는 시간 ms", 38, 234, 195, 24); MakeEdit(hwnd, IDC_DURATION, L"", 236, 230, 76, 26);
         MakeLabel(hwnd, L"이동 거리 px", 348, 234, 195, 24); MakeEdit(hwnd, IDC_TRAVEL, L"", 554, 230, 90, 26);
         MakeLabel(hwnd, L"롱노트 진하기 (32~180)", 38, 276, 195, 24); MakeEdit(hwnd, IDC_LONG_ALPHA, L"", 236, 272, 76, 26);
+        MakeLabel(hwnd, L"불투명도 % (20~100)", 348, 276, 200, 24); MakeEdit(hwnd, IDC_OPACITY, L"", 554, 272, 90, 26);
         MakeButton(hwnd, IDC_CIRCLE_NOTES, L"원형 노트", 38, 320, 260, 26, BS_AUTOCHECKBOX);
         MakeButton(hwnd, IDC_LANE_BG, L"레인 배경", 348, 320, 260, 26, BS_AUTOCHECKBOX);
         MakeButton(hwnd, IDC_ROUNDED_BOXES, L"둥근 모서리", 38, 356, 260, 26, BS_AUTOCHECKBOX);
@@ -2827,24 +3034,33 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         MakeButton(hwnd, IDC_DIFFICULTY_ENABLED, L"입력 난이도 분석 사용", 38, 96, 290, 26, BS_AUTOCHECKBOX);
         MakeButton(hwnd, IDC_DIFFICULTY_HUD, L"OBS 오버레이에도 표시", 348, 96, 310, 26, BS_AUTOCHECKBOX);
         EnsureHudFonts();
-        HWND profileLabel = MakeLabel(hwnd, L"실시간 분석", 38, 130, 156, 20, IDC_DIFFICULTY_PROFILE);
-        HWND previousLabel = MakeLabel(hwnd, L"아까 쳤던 패턴은:", 206, 130, 288, 20);
+        HWND profileLabel = MakeLabel(hwnd, L"실시간 분석", 38, 130, 220, 20, IDC_DIFFICULTY_PROFILE);
+        HWND previousLabel = MakeLabel(hwnd, L"완료된 패턴 · 측정 레벨", 270, 130, 224, 20);
         HWND npsCaption = MakeLabel(hwnd, L"최근 1초 입력", 506, 130, 156, 20);
-        HWND scoreLabel = MakeLabel(hwnd, L"대기", 38, 152, 156, 32, IDC_DIFFICULTY_SCORE);
-        HWND previousValue = MakeLabel(hwnd, L"측정이 끝나면 표시됩니다.", 206, 152, 288, 32, IDC_DIFFICULTY_PREVIOUS);
-        HWND npsLabel = MakeLabel(hwnd, L"NPS  0.0", 506, 152, 156, 32, IDC_DIFFICULTY_NPS);
+        HWND scoreLabel = MakeLabel(hwnd, L"대기", 38, 152, 220, 48, IDC_DIFFICULTY_SCORE);
+        HWND previousValue = MakeLabel(hwnd, L"측정 전", 270, 152, 224, 48, IDC_DIFFICULTY_PREVIOUS);
+        HWND npsLabel = MakeLabel(hwnd, L"NPS  0.0", 506, 164, 156, 32, IDC_DIFFICULTY_NPS);
         for (HWND control : {profileLabel, previousLabel, npsCaption, scoreLabel, previousValue, npsLabel})
             SetWindowLongPtrW(control, GWL_STYLE, GetWindowLongPtrW(control, GWL_STYLE) | SS_CENTER);
         for (HWND control : {profileLabel, previousLabel, npsCaption})
             SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(gHudLabelFont), TRUE);
-        SendMessageW(scoreLabel, WM_SETFONT, reinterpret_cast<WPARAM>(gHudSmallFont), TRUE);
-        SendMessageW(previousValue, WM_SETFONT, reinterpret_cast<WPARAM>(gHudSmallFont), TRUE);
+        SendMessageW(scoreLabel, WM_SETFONT, reinterpret_cast<WPARAM>(gHudValueFont), TRUE);
+        SendMessageW(previousValue, WM_SETFONT, reinterpret_cast<WPARAM>(gHudValueFont), TRUE);
         SendMessageW(npsLabel, WM_SETFONT, reinterpret_cast<WPARAM>(gHudSmallFont), TRUE);
         HWND progress = TrackControl(CreateWindowW(PROGRESS_CLASSW, L"", WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
-            38, 194, 624, 14, hwnd, reinterpret_cast<HMENU>(IDC_DIFFICULTY_BAR), gInstance, nullptr));
+            38, 204, 624, 10, hwnd, reinterpret_cast<HMENU>(IDC_DIFFICULTY_BAR), gInstance, nullptr));
         SendMessageW(progress, PBM_SETRANGE32, 0, 100);
-        MakeLabel(hwnd, L"", 38, 218, 624, 122, IDC_DIFFICULTY_METRICS);
-        MakeLabel(hwnd, L"난이도 8초 / NPS 1초 · 단위 클리어 판정이 아닙니다. 키 등록·테스트 제외.", 38, 344, 624, 24);
+        MakeLabel(hwnd, L"", 38, 222, 624, 118, IDC_DIFFICULTY_METRICS);
+        MakeLabel(hwnd, L"분석 키 수", 38, 344, 100, 24);
+        HWND keyMode = TrackControl(CreateWindowW(WC_COMBOBOXW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+            142, 341, 250, 240, hwnd, reinterpret_cast<HMENU>(IDC_ANALYSIS_KEYS), gInstance, nullptr));
+        SendMessageW(keyMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"등록 키 수 (기존)"));
+        SendMessageW(keyMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"자동 추정 · 세션 고정"));
+        for (int keys = 4; keys <= 10; ++keys) {
+            const auto label = std::to_wstring(keys) + L"K 수동 고정";
+            SendMessageW(keyMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+        }
+        MakeLabel(hwnd, L"배치 유지 · 확정 시 레인 접기", 406, 344, 256, 24);
         MakeButton(hwnd, IDC_REPORT_AUTO, L"연주 리포트 자동 저장 (레인·타이밍 포함, 로컬 HTML)", 38, 374, 624, 26, BS_AUTOCHECKBOX);
         MakeLabel(hwnd, L"", 38, 404, 624, 38, IDC_REPORT_STATUS);
         MakeButton(hwnd, IDC_DIFFICULTY_RESET, L"분석 초기화", 38, 450, 180, 30);
@@ -2864,18 +3080,24 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         MakeButton(hwnd, IDC_STYLE_PREVIEW, L"", 298, 282, 364, 68, BS_OWNERDRAW);
         MakeButton(hwnd, IDC_RESET_KEY_STYLE, L"선택 키 기본값", 298, 366, 364, 30);
         MakeLabel(hwnd, L"노트·롱노트·잔상에 함께 적용됩니다. 전체 불투명도와 곱해집니다.\n키 순서와 프리셋을 바꿔도 키별 설정을 유지합니다. [적용 + 저장]으로 기억해요.", 38, 420, 624, 54);
+#if KEYNOTE_OSU_MEMORY_LINK
         gBuildingPage = 5;
         HWND warning=MakeLabel(hwnd,osu_link::RiskWarning,38,94,624,64,IDC_OSU_WARNING);
         SendMessageW(warning,WM_SETFONT,reinterpret_cast<WPARAM>(gOsuWarningFont),TRUE);
         MakeLabel(hwnd,L"비공식 메모리 조회 기능 · 안티치트 제재 및 계정 불이익이 없다고 보장하지 않습니다.\n기본 OFF이며 앱을 다시 켜면 반드시 OFF로 돌아갑니다.",38,163,624,44);
         MakeButton(hwnd,IDC_OSU_ENABLE,L"위험 안내를 확인하고 이번 실행에서만 연동 켜기",38,215,624,28,BS_AUTOCHECKBOX);
-        MakeLabel(hwnd,L"OFF · 앱을 시작할 때마다 꺼져 있습니다.",38,251,624,44,IDC_OSU_STATUS);
-        MakeLabel(hwnd,L"선택 채보 대기",38,300,624,44,IDC_OSU_TITLE);
-        HWND rating=MakeLabel(hwnd,L"—",38,347,624,30,IDC_OSU_RATING);
+        MakeLabel(hwnd,L"OFF · 앱을 시작할 때마다 꺼져 있습니다.",38,251,624,34,IDC_OSU_STATUS);
+        MakeLabel(hwnd,L"선택 채보 대기",38,288,624,36,IDC_OSU_TITLE);
+        HWND rating=MakeLabel(hwnd,L"—",38,328,624,26,IDC_OSU_RATING);
         SendMessageW(rating,WM_SETFONT,reinterpret_cast<WPARAM>(gHudSmallFont),TRUE);
-        MakeLabel(hwnd,L"",38,383,624,40,IDC_OSU_DETAILS);
-        MakeButton(hwnd,IDC_OSU_FOLDER,L"Songs 폴더 지정…",38,436,180,30);
-        MakeLabel(hwnd,L"stable 원본 1.00× · 모드/변환 미반영\n실제 입력 분석과 키 배치는 별도로 유지됩니다.",230,432,432,42);
+        HWND selectedDetails=MakeLabel(hwnd,L"",38,356,624,28,IDC_OSU_DETAILS);
+        SendMessageW(selectedDetails,WM_SETFONT,reinterpret_cast<WPARAM>(gHudLabelFont),TRUE);
+        HWND revive=MakeLabel(hwnd,L"",38,386,624,26,IDC_OSU_REVIVE);
+        SendMessageW(revive,WM_SETFONT,reinterpret_cast<WPARAM>(gHudSmallFont),TRUE);
+        MakeLabel(hwnd,L"",38,414,624,32,IDC_OSU_SKILLS);
+        MakeButton(hwnd,IDC_OSU_FOLDER,L"Songs 폴더 지정…",38,450,180,26);
+        MakeLabel(hwnd,L"원본 1.00× · 보조: 1~18K / EZ · 모드 미반영",230,450,432,24);
+#endif
         gBuildingPage = -1;
         MakeLabel(hwnd, L"", 18, 490, 684, 24, IDC_DIRTY);
         MakeButton(hwnd, IDC_APPLY, L"적용", 18, 520, 100, 32);
@@ -2907,6 +3129,13 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             DrawStylePreview(draw->hDC, draw->rcItem); return TRUE;
         }
         break;
+    case WM_HSCROLL:
+        if (!gFillingControls && reinterpret_cast<HWND>(lParam) == GetDlgItem(hwnd, IDC_SPACING_SLIDER)) {
+            SetEditInt(hwnd, IDC_LANE_SPACING, static_cast<int>(SendDlgItemMessageW(hwnd, IDC_SPACING_SLIDER, TBM_GETPOS, 0, 0)));
+            SetStatus(L"레인 간격을 조절했어요. [적용 + 테스트]로 확인하고 [적용 + 저장]으로 보관하세요.");
+            return 0;
+        }
+        break;
     case WM_NOTIFY:
         if (reinterpret_cast<NMHDR*>(lParam)->idFrom == IDC_TABS && reinterpret_cast<NMHDR*>(lParam)->code == TCN_SELCHANGE)
             ShowSettingsPage(TabCtrl_GetCurSel(GetDlgItem(hwnd, IDC_TABS)));
@@ -2919,6 +3148,11 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         if (id == ID_TRAY_MOVE) { ToggleOverlayMoveMode(); return 0; }
         if (gFillingControls) return 0;
         if (event == EN_CHANGE) {
+            if (id == IDC_LANE_SPACING) {
+                int spacing = 0;
+                if (ParseInteger(WindowText(GetDlgItem(hwnd, id)), 50, 160, spacing))
+                    SendDlgItemMessageW(hwnd, IDC_SPACING_SLIDER, TBM_SETPOS, TRUE, spacing);
+            }
             if (gStyleVk && (id == IDC_KEY_COLOR || id == IDC_KEY_OPACITY)) {
                 auto& draft = gDraftKeyStyles[gStyleVk];
                 (id == IDC_KEY_COLOR ? draft.color : draft.opacity) = WindowText(GetDlgItem(hwnd, id));
@@ -2947,10 +3181,13 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             }
             return 0;
         }
+        if (id == IDC_ANALYSIS_KEYS && event == CBN_SELCHANGE) { MarkEdited(); return 0; }
         if (event != BN_CLICKED) break;
         switch (id) {
+#if KEYNOTE_OSU_MEMORY_LINK
         case IDC_OSU_ENABLE: ToggleOsuLink(); return 0;
         case IDC_OSU_FOLDER: ChooseOsuSongs(); return 0;
+#endif
         case IDC_PICK_COLOR: PickKeyColor(); return 0;
         case IDC_RESET_KEY_STYLE:
             if (gStyleVk) { gDraftKeyStyles[gStyleVk] = {}; FillKeyStyleFields(); MarkEdited(); }
@@ -2959,6 +3196,8 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case IDC_REPLACE: BeginKeyCapture(CaptureMode::Replace); return 0;
         case IDC_MOVE_LEFT: case IDC_MOVE_RIGHT: case IDC_REMOVE: EditSelectedLane(id); return 0;
         case IDC_CENTER: CenterOverlayDraft(); return 0;
+        case IDC_SIZE_SMALLER: ResizeOverlayDraft(0.9); return 0;
+        case IDC_SIZE_LARGER: ResizeOverlayDraft(1.1); return 0;
         case IDC_MOVE_MODE: ToggleOverlayMoveMode(); return 0;
         case IDC_SAVE_POSITION: SavePositionDraft(); return 0;
         case IDC_REPORT_OPEN: {
@@ -2990,11 +3229,14 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case IDC_APPLY: ReadSettingsControls(); return 0;
         case IDC_SAVE: SaveSettings(); return 0;
         case IDC_TEST: if (ReadSettingsControls()) SpawnTestNotes(); return 0;
-        case IDC_REVERT:
-            if (gConfig.lanesText != gSavedConfig.lanesText || gConfig.difficultyEnabled != gSavedConfig.difficultyEnabled ||
-                gConfig.reportAutoSave != gSavedConfig.reportAutoSave || gConfig.gameOverlay != gSavedConfig.gameOverlay)
+        case IDC_REVERT: {
+            const bool resetAnalysis = gConfig.lanesText != gSavedConfig.lanesText || gConfig.difficultyEnabled != gSavedConfig.difficultyEnabled ||
+                gConfig.reportAutoSave != gSavedConfig.reportAutoSave || gConfig.gameOverlay != gSavedConfig.gameOverlay ||
+                gConfig.analysisKeyMode != gSavedConfig.analysisKeyMode;
+            if (resetAnalysis)
                 ResetDifficulty(static_cast<int>(gSavedConfig.lanes.size()));
             gConfig = gSavedConfig;
+            if (resetAnalysis) gAnalysisKeys.Reset(static_cast<int>(gConfig.lanes.size()), gConfig.analysisKeyMode);
             RebuildLaneConfig();
             ResetInputRuntimeState();
             gUnapplied = gUnsaved = false;
@@ -3003,6 +3245,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             if (!gUiSelfTest) ApplyOverlayWindowStyle();
             SetStatus(L"마지막 저장 상태로 오버레이와 편집 내용을 되돌렸어요.");
             return 0;
+        }
         case IDC_DEBUG_BG: case IDC_CLICK_THROUGH: case IDC_TOPMOST: case IDC_CIRCLE_NOTES:
         case IDC_LANE_BG: case IDC_ROUNDED_BOXES: case IDC_THIN_OUTLINE: case IDC_KEY_TEXT_BOTTOM:
         case IDC_DIFFICULTY_ENABLED: case IDC_DIFFICULTY_HUD: case IDC_REPORT_AUTO:
@@ -3216,6 +3459,7 @@ int RunUiSelfTest(bool blockFirstReport = false) {
     auto click = [&](int id) { SendMessageW(gSettingsWnd, WM_COMMAND, MAKEWPARAM(id, BN_CLICKED), reinterpret_cast<LPARAM>(GetDlgItem(gSettingsWnd, id))); };
     auto edit = [&](int id, const wchar_t* value) { SetWindowTextW(GetDlgItem(gSettingsWnd, id), value); };
     auto raw = [&]() { return WindowText(GetDlgItem(gSettingsWnd, IDC_LANES)); };
+#if KEYNOTE_OSU_MEMORY_LINK
     check("osu_link_defaults_off", !gOsuLink.Current().enabled &&
         SendDlgItemMessageW(gSettingsWnd,IDC_OSU_ENABLE,BM_GETCHECK,0,0)==BST_UNCHECKED);
     check("osu_risk_banner_visible_and_large", WindowText(GetDlgItem(gSettingsWnd,IDC_OSU_WARNING))==osu_link::RiskWarning &&
@@ -3227,6 +3471,43 @@ int RunUiSelfTest(bool blockFirstReport = false) {
     check("osu_warning_no_keeps_reader_off", !gOsuLink.Current().enabled &&
         SendDlgItemMessageW(gSettingsWnd,IDC_OSU_ENABLE,BM_GETCHECK,0,0)==BST_UNCHECKED);
     gOsuRiskMessageBox=&MessageBoxW;
+    osu_link::View auxiliaryView;
+    auxiliaryView.enabled=true; auxiliaryView.ready=true; auxiliaryView.keys=10;
+    auxiliaryView.title=L"합성 채보"; auxiliaryView.difficulty=L"10단 수준";
+    revive_aux::Summary skillFixture; skillFixture.ready=true; skillFixture.skills={52.07,43.02,14.22,0,57.48,0};
+    auxiliaryView.reviveAuxiliary=revive_aux::Label(skillFixture);
+    auxiliaryView.reviveCompact=revive_aux::Label(skillFixture,true);
+    auxiliaryView.reviveSkills=revive_aux::Details(skillFixture);
+    auxiliaryView.revive=skillFixture;
+    ApplyOsuLinkView(auxiliaryView);
+    check("osu_auxiliary_display_is_separate_from_primary", WindowText(GetDlgItem(gSettingsWnd,IDC_OSU_REVIVE))==auxiliaryView.reviveAuxiliary &&
+        WindowText(GetDlgItem(gSettingsWnd,IDC_OSU_RATING))==L"원본 10K · 예상 10단 수준" && !gOsuLink.Current().enabled);
+    check("osu_all_six_skills_displayed_without_lv", WindowText(GetDlgItem(gSettingsWnd,IDC_OSU_SKILLS))==auxiliaryView.reviveSkills &&
+        WindowText(GetDlgItem(gSettingsWnd,IDC_OSU_REVIVE)).find(L"LV")==std::wstring::npos);
+    auxiliaryView.reviveSkills=L"스트림 51  ·  속도 43  ·  연타 14\n동시치기 0  ·  테크닉 57  ·  홀드 0";
+    ApplyOsuLinkView(auxiliaryView);
+    check("osu_skill_values_only_change_refreshes", WindowText(GetDlgItem(gSettingsWnd,IDC_OSU_SKILLS))==auxiliaryView.reviveSkills);
+    auxiliaryView.reviveAuxiliary=L"Revive CPP · 요구 스킬: 시간 한도 · 보류";
+    ApplyOsuLinkView(auxiliaryView);
+    check("osu_auxiliary_only_change_refreshes", WindowText(GetDlgItem(gSettingsWnd,IDC_OSU_REVIVE))==auxiliaryView.reviveAuxiliary);
+    auxiliaryView.keys=19; auxiliaryView.reviveAuxiliary=L"Revive CPP · 요구 스킬: 1~18K 지원";
+    ApplyOsuLinkView(auxiliaryView);
+    check("osu_unsupported_keys_replace_old_auxiliary", WindowText(GetDlgItem(gSettingsWnd,IDC_OSU_REVIVE))==L"Revive CPP · 요구 스킬: 1~18K 지원");
+    auxiliaryView={}; auxiliaryView.enabled=true; auxiliaryView.status=L"새 채보 분석 중";
+    ApplyOsuLinkView(auxiliaryView);
+    check("osu_new_selection_clears_auxiliary", WindowText(GetDlgItem(gSettingsWnd,IDC_OSU_REVIVE)).empty() &&
+        WindowText(GetDlgItem(gSettingsWnd,IDC_OSU_SKILLS)).empty() &&
+        WindowText(GetDlgItem(gSettingsWnd,IDC_OSU_RATING))==L"—");
+    RefreshOsuLinkDisplay();
+    check("osu_off_clears_auxiliary", !gOsuView.enabled && gOsuView.reviveAuxiliary.empty() &&
+        WindowText(GetDlgItem(gSettingsWnd,IDC_OSU_REVIVE)).empty() && DifficultyHeaderHeight(900,220)==140);
+#else
+    check("no_osu_memory_tab_or_controls", TabCtrl_GetItemCount(GetDlgItem(gSettingsWnd,IDC_TABS))==5 &&
+        !GetDlgItem(gSettingsWnd,IDC_OSU_ENABLE) && !GetDlgItem(gSettingsWnd,IDC_OSU_FOLDER) &&
+        !GetDlgItem(gSettingsWnd,IDC_OSU_WARNING) && !GetDlgItem(gSettingsWnd,IDC_OSU_REVIVE) && !GetDlgItem(gSettingsWnd,IDC_OSU_SKILLS));
+    click(IDC_OSU_ENABLE); click(IDC_OSU_FOLDER);
+    check("removed_osu_commands_have_no_ui", !GetDlgItem(gSettingsWnd,IDC_OSU_STATUS));
+#endif
     std::vector<std::wstring> tokens;
     std::wstring error;
     check("aliases_and_punctuation", ValidateLaneText(L" q,semicolon,comma,spacebar", tokens, error) && JoinLaneTokens(tokens) == L"Q,SEMICOLON,COMMA,SPACE");
@@ -3370,6 +3651,57 @@ int RunUiSelfTest(bool blockFirstReport = false) {
         WindowText(GetDlgItem(gSettingsWnd, IDC_Y)) == std::to_wstring(info.rcWork.top + (info.rcWork.bottom - info.rcWork.top - 200) / 2);
     check("center_uses_current_monitor", centerOk && SameConfig(gConfig, saved));
     click(IDC_REVERT);
+    {
+        const Config beforeSizing = gConfig;
+        edit(IDC_WIDTH, L"900"); edit(IDC_HEIGHT, L"220");
+        edit(IDC_NOTE_WIDTH, L"58"); edit(IDC_NOTE_HEIGHT, L"34"); edit(IDC_TRAVEL, L"180");
+        edit(IDC_X, L"123"); edit(IDC_LANE_SPACING, L"85");
+        click(IDC_SIZE_SMALLER);
+        Config smaller;
+        check("resize_scales_window_notes_and_travel", BuildSettingsCandidate(smaller, false) &&
+            smaller.width == 810 && smaller.height == 198 && smaller.noteWidth == 52 &&
+            smaller.noteHeight == 31 && smaller.travelPx == 162);
+        check("resize_is_draft_and_preserves_other_fields", SameConfig(gConfig, beforeSizing) && gUnapplied &&
+            smaller.x == 123 && smaller.laneSpacingPercent == 85 && smaller.lanesText == beforeSizing.lanesText);
+        click(IDC_SIZE_LARGER);
+        Config larger;
+        check("resize_grows_current_draft", BuildSettingsCandidate(larger, false) && larger.width == 891 &&
+            larger.height == 218 && larger.noteWidth == 57 && larger.noteHeight == 34 && larger.travelPx == 178);
+        for (int i = 0; i < 40; ++i) click(IDC_SIZE_SMALLER);
+        check("resize_minimum_keeps_note_below_hud", BuildSettingsCandidate(smaller, false) &&
+            smaller.width == 240 && smaller.noteWidth == 24 && smaller.noteHeight == 18 && smaller.travelPx == 40 &&
+            smaller.height >= 76 + smaller.noteHeight + 16);
+        edit(IDC_WIDTH, L"invalid");
+        const auto heightBefore = WindowText(GetDlgItem(gSettingsWnd, IDC_HEIGHT));
+        click(IDC_SIZE_SMALLER);
+        check("resize_invalid_draft_is_not_partially_changed", WindowText(GetDlgItem(gSettingsWnd, IDC_WIDTH)) == L"invalid" &&
+            WindowText(GetDlgItem(gSettingsWnd, IDC_HEIGHT)) == heightBefore && SameConfig(gConfig, beforeSizing));
+        click(IDC_REVERT);
+        HWND slider = GetDlgItem(gSettingsWnd, IDC_SPACING_SLIDER);
+        check("spacing_slider_range", slider && SendMessageW(slider, TBM_GETRANGEMIN, 0, 0) == 50 &&
+            SendMessageW(slider, TBM_GETRANGEMAX, 0, 0) == 160);
+        edit(IDC_LANE_SPACING, L"123");
+        check("spacing_numeric_updates_slider", SendMessageW(slider, TBM_GETPOS, 0, 0) == 123);
+        SendMessageW(slider, TBM_SETPOS, TRUE, 65);
+        SendMessageW(gSettingsWnd, WM_HSCROLL, MAKEWPARAM(TB_THUMBTRACK, 65), reinterpret_cast<LPARAM>(slider));
+        check("spacing_slider_updates_draft_only", WindowText(GetDlgItem(gSettingsWnd, IDC_LANE_SPACING)) == L"65" &&
+            SameConfig(gConfig, beforeSizing) && gUnapplied);
+        edit(IDC_WIDTH, L"900"); edit(IDC_HEIGHT, L"220"); click(IDC_SIZE_SMALLER);
+        check("size_and_spacing_save", SaveSettings());
+        const Config sized = gConfig;
+        gConfig = Config{};
+        check("size_and_spacing_json_reload", LoadJsonConfig() && gConfig.width == sized.width &&
+            gConfig.height == sized.height && gConfig.noteWidth == sized.noteWidth && gConfig.noteHeight == sized.noteHeight &&
+            gConfig.travelPx == sized.travelPx && gConfig.laneSpacingPercent == 65);
+        gConfig = Config{}; LoadIniConfig();
+        check("size_and_spacing_ini_reload", gConfig.width == sized.width && gConfig.height == sized.height &&
+            gConfig.noteWidth == sized.noteWidth && gConfig.noteHeight == sized.noteHeight &&
+            gConfig.travelPx == sized.travelPx && gConfig.laneSpacingPercent == 65);
+        gConfig = beforeSizing; gSavedConfig = beforeSizing; RebuildLaneConfig();
+        gUnapplied = gUnsaved = false; FillSettingsControls(gSettingsWnd); SaveConfig();
+        check("size_and_spacing_restore", WindowText(GetDlgItem(gSettingsWnd, IDC_WIDTH)) == std::to_wstring(beforeSizing.width) &&
+            SendMessageW(slider, TBM_GETPOS, 0, 0) == beforeSizing.laneSpacingPercent);
+    }
     ShowSettingsPage(3);
     ResetDifficulty(static_cast<int>(gConfig.lanes.size()));
     for (int i = 0; i < 24; ++i) {
@@ -3377,6 +3709,8 @@ int RunUiSelfTest(bool blockFirstReport = false) {
         RecordDifficultyInput(i % 4, false, i * 125.0 + 10);
     }
     RefreshDifficultyDisplay(3000);
+    for(int retry=0;retry<200 && gReviveLive.Busy();++retry) {Sleep(2);RefreshDifficultyDisplay(3000);}
+    check("registered_four_key_cpp_live",gReviveLive.Current().ready && gAnalysisKeys.Keys()==4);
     check("difficulty_live_settings_display", gDifficultySnapshot.ready && gDifficultySnapshot.samples == 24 &&
         WindowText(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_SCORE)).find(L"단") != std::wstring::npos &&
         WindowText(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_PROFILE)) == L"Reform 4K · 분석" &&
@@ -3391,12 +3725,12 @@ int RunUiSelfTest(bool blockFirstReport = false) {
     check("session_continues_until_ten_seconds_after_release", !gDifficultySnapshot.idle && !gPatternSummary.Completed().ready);
     RefreshDifficultyDisplay(12885);
     const auto completedText = PreviousPatternValue();
-    check("finished_pattern_sentence_visible", gPatternSummary.Completed().ready &&
+    check("finished_pattern_level_visible", gPatternSummary.Completed().ready &&
         WindowText(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_PREVIOUS)) == completedText &&
-        completedText.find(L"난이도입니다.") != std::wstring::npos &&
+        completedText == FormatDifficultyRating(gPatternSummary.Completed()) &&
         WindowText(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_NPS)) == L"NPS  0.0");
     RefreshDifficultyDisplay(15000);
-    check("finished_sentence_stays_when_idle", PreviousPatternValue() == completedText);
+    check("finished_level_stays_when_idle", PreviousPatternValue() == completedText);
     RECT liveRect{}, previousRect{}, npsRect{};
     GetWindowRect(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_SCORE), &liveRect);
     GetWindowRect(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_PREVIOUS), &previousRect);
@@ -3420,8 +3754,8 @@ int RunUiSelfTest(bool blockFirstReport = false) {
     check("hud_can_be_hidden_independently", ReadSettingsControls() && !gConfig.difficultyHud &&
         gConfig.difficultyEnabled && DifficultyHeaderHeight(900, 220) == 0);
     SendDlgItemMessageW(gSettingsWnd, IDC_DIFFICULTY_HUD, BM_SETCHECK, BST_CHECKED, 0);
-    check("hud_adapts_to_small_overlay", ReadSettingsControls() && DifficultyHeaderHeight(900, 220) == 76 &&
-        DifficultyHeaderHeight(240, 90) == 76 && DifficultyHeaderHeight(600,90) == 56);
+    check("hud_adapts_to_small_overlay", ReadSettingsControls() && CurrentHudLayout(900).liveLnHeight == 40 &&
+        DifficultyHeaderHeight(900, 220) == 180 && DifficultyHeaderHeight(240, 90) == 344 && DifficultyHeaderHeight(600,90) == 216);
     SendDlgItemMessageW(gSettingsWnd, IDC_DIFFICULTY_ENABLED, BM_SETCHECK, BST_UNCHECKED, 0);
     bool disabled = ReadSettingsControls();
     RecordDifficultyInput(0, true, 4000);
@@ -3631,15 +3965,15 @@ int RunUiSelfTest(bool blockFirstReport = false) {
     for (auto profile : {pattern::RatingProfile::Osu4, pattern::RatingProfile::Osu7, pattern::RatingProfile::Osu8, pattern::RatingProfile::Osu10}) {
         for (int sample = 0; sample <= 400; ++sample) {
             const auto value = pattern::FormatDan(profile, pattern::EstimateDan(profile, sample * (profile == pattern::RatingProfile::Osu10 ? 0.075 : 0.025)));
-            for (int available : {105, 138, 208}) {
-                SelectObject(measureDc, FitDifficultyFont(measureDc, value, available, gHudSmallFont));
+            for (int available : {165, 218, 350}) {
+                const int height = available == 350 ? 51 : available == 218 ? 48 : 29;
+                SelectObject(measureDc, FitDifficultyFont(measureDc, value, available, gHudValueFont, height));
                 SIZE size{}; GetTextExtentPoint32W(measureDc, value.c_str(), static_cast<int>(value.size()), &size);
                 if (size.cx > available && danFits) log << "dan_width=" << sample << "," << size.cx << ",available=" << available << "\n";
-                danFits = danFits && size.cx <= available && size.cy <= 31;
+                danFits = danFits && size.cx <= available && size.cy <= height;
             }
-            const auto sentence = value + L"의 난이도입니다."; // longest neutral form
             SetDifficultyText(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_SCORE), value);
-            SetDifficultyText(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_PREVIOUS), sentence);
+            SetDifficultyText(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_PREVIOUS), value);
             for (int id : {IDC_DIFFICULTY_SCORE, IDC_DIFFICULTY_PREVIOUS}) {
                 HWND control = GetDlgItem(gSettingsWnd, id);
                 SelectObject(measureDc, reinterpret_cast<HFONT>(SendMessageW(control, WM_GETFONT, 0, 0)));
@@ -3649,13 +3983,15 @@ int RunUiSelfTest(bool blockFirstReport = false) {
                 DrawTextW(measureDc, text.c_str(), -1, &needed, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
                 danFits = danFits && needed.right <= bounds.right && needed.bottom <= bounds.bottom;
             }
-            SelectObject(measureDc, gHudLabelFont);
-            SIZE size{}; GetTextExtentPoint32W(measureDc, sentence.c_str(), static_cast<int>(sentence.size()), &size);
-            if (size.cx > 226 && danFits) log << "dan_sentence_width=" << sample << "," << size.cx << "\n";
-            danFits = danFits && size.cx <= 226 && size.cy * 2 <= 27;
         }
     }
     check("dan_heights_and_ranges_fit_all_cards", danFits);
+    for (int id : {IDC_DIFFICULTY_SCORE, IDC_DIFFICULTY_PREVIOUS}) {
+        SetDifficultyText(GetDlgItem(gSettingsWnd, id), L"10단 수준");
+        check(id == IDC_DIFFICULTY_SCORE ? "live_level_uses_large_font" : "completed_level_uses_large_font",
+            reinterpret_cast<HFONT>(SendDlgItemMessageW(gSettingsWnd, id, WM_GETFONT, 0, 0)) == gHudValueFont);
+    }
+    check("compact_level_uses_larger_font", FitDifficultyFont(measureDc, L"10단 수준", 165, gHudCompactFont, 29) == gHudCompactFont);
     SelectObject(measureDc, gHudSmallFont);
     RECT npsNeeded{0,0,108,31};
     DrawTextW(measureDc, L"4096.0", -1, &npsNeeded, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
@@ -3666,7 +4002,7 @@ int RunUiSelfTest(bool blockFirstReport = false) {
     SetDifficultyText(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_SCORE), DifficultyValue());
     SetWindowTextW(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_METRICS), DifficultyDetails(true).c_str());
     SetWindowTextW(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_NPS), L"NPS  4096.0");
-    SetDifficultyText(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_PREVIOUS), L">⑤24.6 난이도입니다.");
+    SetDifficultyText(GetDlgItem(gSettingsWnd, IDC_DIFFICULTY_PREVIOUS), L">⑤24.6");
     for (const auto& page : gPageControls) for (HWND control : page) {
         wchar_t className[32]{};
         GetClassNameW(control, className, 32);
@@ -3686,6 +4022,33 @@ int RunUiSelfTest(bool blockFirstReport = false) {
     SelectObject(measureDc, previousFont);
     ReleaseDC(gSettingsWnd, measureDc);
     check("settings_text_fits_at_default_scale", textFits);
+    HDC skillDc=GetDC(gSettingsWnd);
+    auto skillOldFont=SelectObject(skillDc,gHudSmallFont);
+    revive_aux::Summary maximumSkills;maximumSkills.ready=true;maximumSkills.skills.fill(100);
+    bool skillFits=true;
+    for (int i=0;i<6;++i) {
+        const auto name=revive_aux::SkillName(i), value=revive_aux::SkillValue(maximumSkills,i);
+        SelectObject(skillDc,gHudSmallFont);
+        SIZE extent{};GetTextExtentPoint32W(skillDc,name.c_str(),static_cast<int>(name.size()),&extent);
+        skillFits=skillFits && extent.cx<=90 && extent.cy<=24;
+        SelectObject(skillDc,gHudCompactFont);
+        GetTextExtentPoint32W(skillDc,value.c_str(),static_cast<int>(value.size()),&extent);
+        skillFits=skillFits && extent.cx<=50 && extent.cy<=34;
+        SelectObject(skillDc,gHudMediumFont);
+        GetTextExtentPoint32W(skillDc,value.c_str(),static_cast<int>(value.size()),&extent);
+        skillFits=skillFits && extent.cx<=108 && extent.cy<=34;
+    }
+    check("six_large_skill_cells_fit_at_minimum_width",skillFits);
+    const auto lnFont=FitDifficultyFont(skillDc,L"3~4단 mid low",224,gHudMediumFont,36);
+    check("ln_range_keeps_large_font_at_minimum_width",lnFont==gHudMediumFont || lnFont==gHudCompactFont);
+    SelectObject(skillDc,skillOldFont);ReleaseDC(gSettingsWnd,skillDc);
+    gReviveLive.Reset(10);
+    for(int i=0;i<80;++i) {gReviveLive.Key(i%10,true,i*100);gReviveLive.Key(i%10,false,i*100+30);}
+    gReviveLive.Update(8000,true,10,false,false,false);
+    for(int retry=0;retry<200 && gReviveLive.Busy();++retry) {
+        Sleep(2);gReviveLive.Update(8000,true,10,false,false,false);
+    }
+    check("live_cpp_six_skills_ready_for_hud",gReviveLive.Current().ready);
     // Render our own HUD into an off-screen bitmap for layout inspection. This
     // never captures the desktop, installs a hook, or sends keyboard input.
     const auto savedSummary = gPatternSummary;
@@ -3697,6 +4060,7 @@ int RunUiSelfTest(bool blockFirstReport = false) {
     gDifficultySnapshot.outsideCalibration = 0;
     gDifficultySnapshot.currentNps = 48.0;
     auto renderHud = [&](int width, int height, const wchar_t* name, bool settings=false) {
+        if (!settings) height = DifficultyHeaderHeight(width, height);
         BITMAPINFO info{};
         info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         info.bmiHeader.biWidth = width; info.bmiHeader.biHeight = -height;
@@ -3717,32 +4081,97 @@ int RunUiSelfTest(bool blockFirstReport = false) {
             std::string bytes(reinterpret_cast<const char*>(&header), sizeof(header));
             bytes.append(reinterpret_cast<const char*>(&info.bmiHeader), sizeof(info.bmiHeader));
             bytes.append(static_cast<const char*>(pixels), width * height * 4);
-            if(settings) {
-                // A full settings bitmap exceeds the config writer's deliberate
-                // 1MiB read-back limit. This is an owned test image, not config.
-                std::ofstream output(std::filesystem::path(CurrentDirectory()+name),std::ios::binary);
-                output.write(bytes.data(),static_cast<std::streamsize>(bytes.size()));output.close();ok=!!output;
-            } else ok = WriteTextFile(CurrentDirectory() + name, bytes);
+            // Settings and large-font HUD bitmaps can exceed the configuration
+            // writer's 1MiB limit. These are owned test images, not config files.
+            std::ofstream output(std::filesystem::path(CurrentDirectory()+name),std::ios::binary);
+            output.write(bytes.data(),static_cast<std::streamsize>(bytes.size()));output.close();ok=!!output;
             SelectObject(dc, oldBitmap);
         }
         if (bitmap) DeleteObject(bitmap);
         if (dc) DeleteDC(dc);
         return ok;
     };
+    const auto previewPage = gCurrentPage;
+    RECT settingsPreviewBounds{}; GetClientRect(gSettingsWnd, &settingsPreviewBounds);
+    for (const auto& preview : {std::pair<int, const wchar_t*>{1, L"size-settings.bmp"},
+            {2, L"spacing-settings.bmp"}, {3, L"level-settings.bmp"}}) {
+        ShowSettingsPage(preview.first);
+        check("size_spacing_level_settings_render", renderHud(settingsPreviewBounds.right, settingsPreviewBounds.bottom, preview.second, true));
+    }
+    ShowSettingsPage(previewPage);
+#if KEYNOTE_OSU_MEMORY_LINK
     const auto priorPage=gCurrentPage;ShowSettingsPage(5);
     RECT settingsBounds{};GetClientRect(gSettingsWnd,&settingsBounds);
     check("osu_risk_settings_offscreen_render",renderHud(settingsBounds.right,settingsBounds.bottom,L"osu-risk-settings.bmp",true));
     ShowSettingsPage(priorPage);
+#endif
     check("hud_offscreen_layout_render", renderHud(900,76,L"hud-wide.bmp") && renderHud(240,76,L"hud-compact.bmp") && renderHud(600,56,L"hud-low.bmp"));
-    gOsuView.enabled=true;gOsuView.ready=true;gOsuView.keys=5;
-    gOsuView.title=L"선택 곡 미리보기";gOsuView.variant=L"5K Normal";gOsuView.difficulty=L"⑤7.2";
-    check("osu_selected_chart_hud_render", DifficultyHeaderHeight(900,220)==104 &&
+#if KEYNOTE_OSU_MEMORY_LINK
+    gOsuView.enabled=true;gOsuView.ready=true;gOsuView.keys=19;
+    gOsuView.title=L"선택 곡 미리보기";gOsuView.variant=L"19K Unsupported";gOsuView.difficulty=L"⑤7.2";
+    revive_aux::Summary unsupportedSkill;unsupportedSkill.status=L"1~18K 지원";
+    gOsuView.reviveAuxiliary=revive_aux::Label(unsupportedSkill);
+    gOsuView.reviveCompact=revive_aux::Label(unsupportedSkill,true);
+    gOsuView.reviveSkills=revive_aux::Details(unsupportedSkill);
+    gOsuView.revive=unsupportedSkill;
+    check("osu_selected_chart_hud_render", DifficultyHeaderHeight(900,220)==222 &&
         renderHud(900,104,L"hud-osu-selection.bmp") && renderHud(240,104,L"hud-osu-selection-small.bmp"));
-    check("osu_short_overlay_preserves_lanes",DifficultyHeaderHeight(240,90)==76 && DifficultyHeaderHeight(900,90)==56 &&
+    check("osu_short_overlay_preserves_lanes",DifficultyHeaderHeight(240,90)==510 && OverlayPresentationHeight(240)>=554 && DifficultyHeaderHeight(900,90)==222 &&
         renderHud(240,76,L"hud-osu-short.bmp"));
+    gOsuView.keys=10;gOsuView.variant=L"10K Synthetic";gOsuView.difficulty=L"10단 수준";
+    gOsuView.status=L"연동 표시 검증 · 합성 채보 (실제 게임 연결 없음)";
+    revive_aux::Summary previewSkills;previewSkills.ready=true;previewSkills.skills={50,70,82,30,60,91};
+    gOsuView.reviveAuxiliary=revive_aux::Label(previewSkills);
+    gOsuView.reviveCompact=revive_aux::Label(previewSkills,true);
+    gOsuView.reviveSkills=revive_aux::Details(previewSkills);
+    gOsuView.revive=previewSkills;
+    check("osu_revive_auxiliary_hud_render", renderHud(900,104,L"hud-revive-wide.bmp") &&
+        renderHud(240,104,L"hud-revive-compact.bmp") && renderHud(240,76,L"hud-revive-short.bmp") &&
+        renderHud(600,56,L"hud-revive-low.bmp"));
+    auto auxiliaryPreview=gOsuView;gOsuView={};ApplyOsuLinkView(auxiliaryPreview);
+    ShowSettingsPage(5);
+    check("osu_revive_auxiliary_settings_render",renderHud(settingsBounds.right,settingsBounds.bottom,L"revive-settings.bmp",true));
+    ShowSettingsPage(priorPage);
     const bool liveEnabled=gConfig.difficultyEnabled;gConfig.difficultyEnabled=false;
-    check("osu_hud_independent_of_live_input", DifficultyHeaderHeight(900,220)==28 && renderHud(900,28,L"hud-osu-only.bmp"));
-    gConfig.difficultyEnabled=liveEnabled;gOsuView={};
+    check("osu_hud_independent_of_live_input", DifficultyHeaderHeight(900,220)==82 && renderHud(900,28,L"hud-osu-only.bmp"));
+    gConfig.difficultyEnabled=liveEnabled;
+    const auto beforeLnPreview=gDifficultySnapshot;
+    const auto beforeLnKeys=gAnalysisKeys;
+    const auto beforeLnMode=gConfig.analysisKeyMode;
+    const auto beforeLnSummary=gPatternSummary;
+    gDifficultySnapshot.profile=pattern::RatingProfile::Osu4;gDifficultySnapshot.stars=3.0;
+    gDifficultySnapshot.ratingError=0;
+    gPatternSummary.Reset();gPatternSummary.Observe(gDifficultySnapshot);gPatternSummary.Observe(pattern::Snapshot{});
+    gConfig.analysisKeyMode=4;gAnalysisKeys.Reset(4,4);gReviveLive.Reset(4);
+    chartcalc::Chart fourFixture;fourFixture.keys=4;
+    for(int i=0;i<32;++i) for(int lane=0;lane<4;++lane) {
+        fourFixture.notes.push_back({lane,i*250.0,i*250.0+150});
+    }
+    for(int i=0;i<32;++i) {
+        for(int lane=0;lane<4;++lane)gReviveLive.Key(lane,true,i*250);
+        for(int lane=0;lane<4;++lane)gReviveLive.Key(lane,false,i*250+150);
+    }
+    gReviveLive.Update(8000,true,4,false,false,false);
+    for(int retry=0;retry<200 && gReviveLive.Busy();++retry) {Sleep(2);gReviveLive.Update(8000,true,4,false,false,false);}
+    gOsuView.keys=4;gOsuView.title=L"4K LN v2 합성 표시";gOsuView.variant=L"LN comparison";
+    gOsuView.difficulty=FormatDifficultyRating(gDifficultySnapshot);
+    gOsuView.lnDifficulty=pattern::FormatLnDan(gDifficultySnapshot);
+    gOsuView.revive=revive_aux::Analyze(fourFixture);
+    gOsuView.reviveAuxiliary=revive_aux::Label(gOsuView.revive);
+    gOsuView.reviveCompact=revive_aux::Label(gOsuView.revive,true);
+    gOsuView.reviveSkills=revive_aux::Details(gOsuView.revive);
+    const auto fourView=gOsuView;gOsuView={};ApplyOsuLinkView(fourView);
+    check("four_key_selected_skill_settings",WindowText(GetDlgItem(gSettingsWnd,IDC_OSU_SKILLS))==revive_aux::Details(fourView.revive));
+    check("four_key_live_and_file_cpp_values_render",gReviveLive.Current().ready && gOsuView.revive.ready &&
+        gReviveLive.Current().skills[3]>0 && !gReviveLive.Current().holdKnown &&
+        revive_aux::SkillValue(gReviveLive.Current(),5)==L"—" && gOsuView.revive.holdKnown && gOsuView.revive.skills[5]>0);
+    check("ln4_live_and_selected_rows_render",CurrentHudLayout(240).liveLnHeight==60 && CurrentHudLayout(240).selectedLnHeight==60 &&
+        renderHud(240,90,L"hud-ln4-compact.bmp") && renderHud(900,220,L"hud-ln4-wide.bmp"));
+    gDifficultySnapshot=beforeLnPreview;gAnalysisKeys=beforeLnKeys;
+    gConfig.analysisKeyMode=beforeLnMode;gPatternSummary=beforeLnSummary;RefreshOsuLinkDisplay();
+#else
+    check("no_osu_memory_hud_keeps_live_layout",DifficultyHeaderHeight(900,220)==140 && DifficultyHeaderHeight(900,90)==140);
+#endif
     const auto previewLanes = gConfig.lanes;
     gConfig.lanes.resize(4);
     gDifficultySnapshot.profile = pattern::RatingProfile::Osu4;
@@ -3750,7 +4179,7 @@ int RunUiSelfTest(bool blockFirstReport = false) {
     gDifficultySnapshot.ratingError = 0;
     gPatternSummary.Reset();
     gPatternSummary.Observe(gDifficultySnapshot); gPatternSummary.Observe(pattern::Snapshot{});
-    check("dan_completed_height_matches_live", PreviousPatternValue() == L"8~9단 mid low 난이도입니다.");
+    check("dan_completed_height_matches_live", PreviousPatternValue() == L"8~9단 mid low");
     check("dan_hud_offscreen_layout_render", renderHud(900,76,L"hud-dan-wide.bmp") &&
         renderHud(240,76,L"hud-dan-compact.bmp") && renderHud(600,56,L"hud-dan-low.bmp"));
     gConfig.lanes.resize(8);
@@ -3760,7 +4189,7 @@ int RunUiSelfTest(bool blockFirstReport = false) {
     gPatternSummary.Observe(gDifficultySnapshot); gPatternSummary.Observe(pattern::Snapshot{});
     gDifficultySnapshot.stars = 8.8; // Demise mid low.
     check("8k_live_and_completed_use_dan_labels", DifficultyValue() == L"Demise단 mid low" &&
-        PreviousPatternValue() == L"13~14단 수준의 난이도입니다.");
+        PreviousPatternValue() == L"13~14단 수준");
     check("8k_hud_offscreen_layout_render", renderHud(900,76,L"hud-8k-wide.bmp") &&
         renderHud(240,76,L"hud-8k-compact.bmp") && renderHud(600,56,L"hud-8k-low.bmp"));
     gConfig.lanes.resize(10);
@@ -3772,7 +4201,7 @@ int RunUiSelfTest(bool blockFirstReport = false) {
     gDifficultySnapshot.stars = 5.23186;
     gDifficultySnapshot.rating = 22.7947;
     check("10k_live_and_completed_use_revive_dans", DifficultyProfileName() == L"Revive 10K" &&
-        DifficultyValue() == L"개전 수준" && PreviousPatternValue() == L"10단 수준의 난이도입니다.");
+        DifficultyValue() == L"개전 수준" && PreviousPatternValue() == L"10단 수준");
     gDifficultySnapshot.rating = 25.668;
     check("10k_overjoy_label", DifficultyValue() == L"오버조이 수준");
     check("10k_revive_hud_offscreen_layout_render", renderHud(900,76,L"hud-10k-revive-wide.bmp") &&
@@ -3963,6 +4392,9 @@ int RunUiSelfTest(bool blockFirstReport = false) {
 
     // Exercise the opt-in flow against isolated files, including a real worker
     // write failure. No keyboard hook or real input is installed by this test.
+    // Validation earlier in this test can focus the settings window. Synthetic
+    // presses must use the allowed practice page, independent of Windows focus.
+    ShowSettingsPage(3);
     const auto reportTestRoot = std::filesystem::path(CurrentDirectory()) /
         (L"report-ui-" + std::to_wstring(GetTickCount64()));
     std::error_code reportSetupError;
@@ -4045,6 +4477,117 @@ int RunUiSelfTest(bool blockFirstReport = false) {
     check("legacy_report_ini_fixture", WriteTextFile(gIniConfigPath, "[overlay]\nwidth=640\n"));
     gConfig = Config{}; LoadIniConfig();
     check("legacy_report_ini_defaults_off", !gConfig.reportAutoSave && !gConfig.gameOverlay);
+    check("legacy_key_mode_defaults_registered", gConfig.analysisKeyMode == 0);
+    gConfig = Config{};
+    gConfig.lanesText = L"A,S,D,F,V,N,J,K,L,SEMICOLON";
+    RebuildLaneConfig(); ResetDifficulty(10); FillSettingsControls(gSettingsWnd);
+    gCurrentPage = 3;
+    const auto registeredKeys = gConfig.lanesText;
+    for (int i=0;i<80;++i) {
+        RecordDifficultyInput(i%10,true,180000+i*100.);
+        RecordDifficultyInput(i%10,false,180030+i*100.);
+    }
+    RefreshDifficultyDisplay(188000);
+    for(int retry=0;retry<200 && gReviveLive.Busy();++retry) {Sleep(2);RefreshDifficultyDisplay(188000);}
+    check("accepted_live_input_reaches_cpp_meter",gReviveLive.Current().ready && gDifficultySnapshot.analysisKeys==10);
+    ResetDifficulty(10);
+    SendDlgItemMessageW(gSettingsWnd, IDC_ANALYSIS_KEYS, CB_SETCURSEL, 2, 0);
+    SendMessageW(gSettingsWnd, WM_COMMAND, MAKEWPARAM(IDC_ANALYSIS_KEYS, CBN_SELCHANGE), 0);
+    check("manual_key_mode_is_draft", gConfig.analysisKeyMode == 0 && gUnapplied);
+    check("manual_key_mode_applies_without_layout_change", ReadSettingsControls() && gConfig.analysisKeyMode == 4 &&
+        gConfig.lanesText == registeredKeys && gConfig.lanes.size() == 10);
+    for (int i = 0; i < 64; ++i) {
+        RecordDifficultyInput((i%4)*2, true, 200000+i*125.);
+        RecordDifficultyInput((i%4)*2, false, 200010+i*125.);
+    }
+    RefreshDifficultyDisplay(208000);
+    for(int retry=0;retry<200 && gReviveLive.Busy();++retry) {Sleep(2);RefreshDifficultyDisplay(208000);}
+    check("manual_four_key_cpp_live",gReviveLive.Current().ready);
+    check("manual_key_mode_routes_live_profile", gDifficultySnapshot.ready && gDifficultySnapshot.analysisKeys == 4 &&
+        gDifficultySnapshot.profile == pattern::RatingProfile::Osu4 && DifficultyProfileName() == L"Reform 4K");
+    check("ln4_basis_follows_manual_four_key_analysis",!pattern::FormatLnDan(gDifficultySnapshot).empty() &&
+        CurrentHudLayout(240).liveLnHeight==60 && WindowText(GetDlgItem(gSettingsWnd,IDC_DIFFICULTY_METRICS)).find(L"4K LN v2")!=std::wstring::npos);
+    for (int mode : {4, -1}) {
+        SendDlgItemMessageW(gSettingsWnd, IDC_ANALYSIS_KEYS, CB_SETCURSEL, mode == -1 ? 1 : 2, 0);
+        check("analysis_key_mode_saved", SaveSettings());
+        const auto savedKeys = gConfig;
+        gConfig = Config{};
+        check("analysis_key_mode_json_roundtrip", LoadJsonConfig() && gConfig.analysisKeyMode == mode);
+        gConfig = Config{}; LoadIniConfig();
+        check("analysis_key_mode_ini_roundtrip", gConfig.analysisKeyMode == mode);
+        gConfig = savedKeys; RebuildLaneConfig(); ResetDifficulty(10); FillSettingsControls(gSettingsWnd);
+    }
+    for (int i = 0; i < 64; ++i) {
+        RecordDifficultyInput((i%4)*2, true, 220000+i*125.);
+        RecordDifficultyInput((i%4)*2, false, 220010+i*125.);
+    }
+    RefreshDifficultyDisplay(228000);
+    for(int retry=0;retry<200 && gReviveLive.Busy();++retry) {Sleep(2);RefreshDifficultyDisplay(228000);}
+    check("automatic_four_key_cpp_live",gReviveLive.Current().ready);
+    check("automatic_key_mode_locks_live_profile", gDifficultySnapshot.ready && !gDifficultySnapshot.keyModePending &&
+        gDifficultySnapshot.analysisKeys == 4 && gConfig.lanes.size() == 10);
+    const auto folded = CurrentLaneDisplay(gConfig.width);
+    check("locked_subset_folds_four_lanes", folded.compact && folded.visible == 4 && folded.width < gConfig.width &&
+        folded.Visible(0) && folded.Visible(2) && folded.Visible(4) && folded.Visible(6) && !folded.Visible(9));
+    const int configuredWidth = gConfig.width;
+    HWND foldWindow = CreateWindowExW(WS_EX_LAYERED, L"KeyNoteOverlayCppWindow", L"hidden folded lane test", WS_POPUP,
+        0, 0, gConfig.width, gConfig.height, nullptr, nullptr, gInstance, nullptr);
+    SyncOverlayDisplayWidth(foldWindow);
+    RECT foldedRect{}; GetClientRect(foldWindow, &foldedRect);
+    check("folding_changes_window_not_saved_width", foldWindow && foldedRect.right == folded.width && gConfig.width == configuredWidth);
+    const bool priorHud = gConfig.difficultyHud, priorBackground = gConfig.debugBackground, priorLanes = gConfig.laneBackground;
+    gConfig.difficultyHud = gConfig.debugBackground = gConfig.laneBackground = false;
+    Note foldedNote; foldedNote.lane = 6; foldedNote.label = gConfig.lanes[6].label; foldedNote.pressMs = 227900;
+    foldedNote.color = RGB(255,0,0); foldedNote.opacity = 100;
+    gNotes = {foldedNote};
+    overlay::AlphaSurface foldedFrame(folded.width, gConfig.height);
+    bool foldedRendered = RenderOverlay(foldedFrame, 228000);
+    int minPixel = folded.width, maxPixel = -1;
+    for (int y = 0; y < foldedFrame.height; ++y) for (int x = 0; x < foldedFrame.width; ++x)
+        if (foldedFrame.pixels[y*foldedFrame.width+x] == 0xffff0000u) { minPixel = std::min(minPixel,x); maxPixel = std::max(maxPixel,x); }
+    check("folded_note_keeps_color_width_and_physical_identity", foldedRendered && maxPixel >= minPixel &&
+        std::abs((minPixel+maxPixel)/2.0-folded.Center(6,folded.width)) <= 1 &&
+        maxPixel-minPixel+1 >= gConfig.noteWidth-4 && gNotes[0].lane == 6 && gNotes[0].label == gConfig.lanes[6].label);
+    gNotes[0].pressMs = 227000; // The same sparse physical lane remains visible for a long hold.
+    check("folded_long_note_renders", RenderOverlay(foldedFrame,228000));
+    gNotes[0].lane = 9;
+    check("unselected_lane_not_drawn_before_conflict", RenderOverlay(foldedFrame,228000) &&
+        std::all_of(foldedFrame.pixels,foldedFrame.pixels+foldedFrame.width*foldedFrame.height,[](DWORD p){return p==0;}));
+    gNotes.clear();
+    gConfig.difficultyHud = priorHud; gConfig.debugBackground = priorBackground; gConfig.laneBackground = priorLanes;
+    RecordDifficultyInput(9, true, 228100); RecordDifficultyInput(9, false, 228110);
+    RefreshDifficultyDisplay(228110);
+    check("extra_lane_clears_cpp_axes",!gReviveLive.Current().ready && gReviveLive.Current().status==L"키 수 확인");
+    check("automatic_late_key_warning_preserves_input", !gDifficultySnapshot.ready && gDifficultySnapshot.keyModeConflict &&
+        DifficultyValue() == L"키 수 확인" && gDifficultySnapshot.currentNps > 0);
+    SyncOverlayDisplayWidth(foldWindow); GetClientRect(foldWindow, &foldedRect);
+    check("extra_key_unfolds_all_lanes", !CurrentLaneDisplay(gConfig.width).compact && foldedRect.right == configuredWidth);
+    if (foldWindow) DestroyWindow(foldWindow);
+    RecordDifficultyInput(0, true, 240000); RecordDifficultyInput(0, false, 240010);
+    RefreshDifficultyDisplay(240010);
+    check("automatic_new_session_restarts_inference", gDifficultySnapshot.keyModePending && !gDifficultySnapshot.keyModeConflict);
+    SendDlgItemMessageW(gSettingsWnd, IDC_ANALYSIS_KEYS, CB_SETCURSEL, 0, 0);
+    check("registered_key_mode_restores_legacy_basis", ReadSettingsControls() && gConfig.analysisKeyMode == 0 && DifficultyProfileName() == L"Revive 10K");
+    const auto beforeAllKeys = gConfig;
+    const wchar_t* customTokens[] = {L"A",L"S",L"D",L"F",L"G",L"H",L"J",L"K",L"L",L"Q",L"W",L"E",L"R",L"T",L"Y",L"U",L"I",L"O"};
+    for (int keys=1; keys<=revive::MaxKeys; ++keys) {
+        gConfig.lanesText.clear(); gConfig.analysisKeyMode=0;
+        for(int lane=0;lane<keys;++lane) {if(lane)gConfig.lanesText+=L",";gConfig.lanesText+=customTokens[lane];}
+        RebuildLaneConfig(); ResetDifficulty(keys);
+        for(int i=0;i<80;++i) {
+            RecordDifficultyInput(i%keys,true,260000+i*100.);
+            RecordDifficultyInput(i%keys,false,260095+i*100.);
+        }
+        RefreshDifficultyDisplay(268000);
+        for(int retry=0;retry<200 && gReviveLive.Busy();++retry) {Sleep(2);RefreshDifficultyDisplay(268000);}
+        check("registered_1_to_18_keys_reach_live_auxiliary",gReviveLive.Current().ready && gDifficultySnapshot.analysisKeys==keys &&
+            !gReviveLive.Current().holdKnown && revive_aux::SkillValue(gReviveLive.Current(),5)==L"—");
+        if(keys==5 || keys==7 || keys==9 || keys==18) {
+            const auto name=L"hud-"+std::to_wstring(keys)+L"k-compact.bmp";
+            check("other_keys_six_large_skills_render",renderHud(240,90,name.c_str()));
+        }
+    }
+    gConfig=beforeAllKeys; RebuildLaneConfig(); ResetDifficulty(static_cast<int>(gConfig.lanes.size()));
     // Remove only the fresh directory owned by this test invocation.
     if (reportRootCreated) {
         std::error_code cleanupError;

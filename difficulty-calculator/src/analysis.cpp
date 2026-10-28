@@ -97,38 +97,36 @@ Analysis Analyze(Chart chart, double holdWeight, const std::atomic<bool>* cancel
         return a.lane < b.lane;
     });
     pattern::DifficultyEstimator estimator(result.chart.keys, holdWeight);
-    std::size_t next = 0;
-    // Include the final partial step: otherwise all notes in the last 0-2 seconds
-    // of a file can be omitted from its summary and both graphs.
-    for (double time = std::min(8000.0, result.durationMs);;) {
+    pattern::LiveContinuity continuity;
+    pattern::PatternSummary peak;
+    auto evaluate = [&](double time) {
         if (cancelled && cancelled->load()) throw std::runtime_error("Analysis cancelled.");
+        auto snapshot = continuity.Update(estimator.Evaluate(time, true), time);
+        result.limited |= snapshot.limited;
+        // A file is one result even across long rests. Use the live peak rule,
+        // but publish only at EOF so a rest cannot discard an earlier peak.
+        if (!snapshot.idle) peak.Observe(snapshot);
+        return snapshot;
+    };
+    std::size_t next = 0;
+    // Replay the live callbacks: evaluate before each keydown, and refresh at
+    // 100ms intervals from the first note. Include the final off-grid release.
+    for (double time = 0;;) {
         while (next < events.size() && events[next].time <= time) {
             const auto& event = events[next++];
-            if (event.down) estimator.KeyDown(event.lane, event.time);
+            if (event.down) {
+                evaluate(event.time);
+                estimator.KeyDown(event.lane, event.time);
+            }
             else estimator.KeyUp(event.lane, event.time);
+            continuity.RecordActivity(event.time);
         }
-        auto snapshot = estimator.Evaluate(time, true);
-        result.limited |= snapshot.limited;
-        result.points.push_back({time, snapshot});
+        result.points.push_back({time, evaluate(time)});
         if (time >= result.durationMs) break;
-        time = std::min(time + 2000.0, result.durationMs);
+        time = std::min(time + 100.0, result.durationMs);
     }
-    std::vector<pattern::Snapshot> strongest;
-    for (const auto& point : result.points)
-        if (point.snapshot.ready && !point.snapshot.idle && !point.snapshot.limited) strongest.push_back(point.snapshot);
-    std::sort(strongest.begin(), strongest.end(), [](const auto& a, const auto& b) { return DifficultyValue(a) > DifficultyValue(b); });
-    result.strongestWindows = static_cast<int>(std::min<std::size_t>(3, strongest.size()));
-    if (result.strongestWindows && !result.limited) {
-        result.summary = strongest.front();
-        result.summary.stars = result.summary.rating = result.summary.score = result.summary.nps = 0;
-        for (int i = 0; i < result.strongestWindows; ++i) {
-            result.summary.stars += strongest[i].stars / result.strongestWindows;
-            result.summary.rating += strongest[i].rating / result.strongestWindows;
-            result.summary.score += strongest[i].score / result.strongestWindows;
-            result.summary.nps += strongest[i].nps / result.strongestWindows;
-            if (strongest[i].outsideCalibration != strongest.front().outsideCalibration) result.summary.outsideCalibration=0;
-        }
-    }
+    peak.Observe(pattern::Snapshot{});
+    if (!result.limited) result.summary = peak.Completed();
     return result;
 }
 namespace {
@@ -151,9 +149,12 @@ std::string RenderReport(const Analysis& a) {
         << "h1{color:#6fe0ec}section{background:#182437;padding:22px;margin:18px 0;border-radius:14px}.muted{color:#a7b8cc}svg{width:100%;height:auto}table{border-collapse:collapse;width:100%}td,th{padding:8px;text-align:left;border-bottom:1px solid #34465e}</style>"
         << "<h1>채보 난이도 분석</h1><section><h2>" << Escape(a.chart.title) << "</h2><p>" << Escape(a.chart.artist) << " · " << Escape(a.chart.variant) << "</p>"
         << "<p>" << a.chart.keys << "K · " << Escape(Basis(a.chart.keys)) << "</p><h2>" << Escape(DifficultyLabel(a.summary)) << "</h2>"
-        << "<p>가장 강한 " << a.strongestWindows << "개 구간의 평균 · " << a.chart.notes.size() << " 노트 · " << N(a.durationMs / 1000) << "초 · 평균 NPS " << N(a.averageNps) << " · 최대 1초 NPS " << N(a.maximumNps,0) << "</p>"
-        << "<p class='muted'>최근 8초 창을 2초 간격으로 분석하고 파일 끝 시점도 포함합니다. 전체 곡 공식 등급이나 단위 합격 예측이 아닙니다. LN 추가 부담 " << (a.holdWeight == 1 ? "1 (기준 채보 측정)" : "2/3 (오버레이와 동일)") << ".</p></section>";
+        << "<p>실시간 방식의 최고 구간 · " << a.chart.notes.size() << " 노트 · " << N(a.durationMs / 1000) << "초 · 평균 NPS " << N(a.averageNps) << " · 최대 1초 NPS " << N(a.maximumNps,0) << "</p>"
+        << "<p class='muted'>최근 최대 8초 창을 0.1초마다, 각 누름 직전과 파일 끝에도 분석합니다. 그래프는 0.1초 표본입니다. 전체 곡 공식 등급이나 단위 합격 예측이 아닙니다. LN 추가 부담 " << (a.holdWeight == 1 ? "1 (기준 채보 측정)" : "2/3 (오버레이와 동일)") << ".</p></section>";
     if (a.limited) out << "<p>일부 구간이 분석 버퍼를 초과해 요약 난이도를 보류했습니다.</p>";
+    const auto ln = pattern::FormatLnDan(a.summary);
+    if (!ln.empty() && a.holdWeight == pattern::DefaultHoldWeight)
+        out << "<p>4K LN Dan Courses v2 보조 비교: " << Escape(ln) << " · 일반 Reform과 별도 기준</p>";
     for (const auto& warning : a.chart.warnings) out << "<p>" << Escape(warning) << "</p>";
     for (bool difficulty : {false, true}) {
         double maximum = 1;

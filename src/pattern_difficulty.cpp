@@ -35,7 +35,9 @@ Snapshot LiveContinuity::Update(const Snapshot& raw, double nowMs) {
     }
     Snapshot result = raw;
     result.idle = false;
-    if (raw.limited || (lastReady_.ready && lastReady_.profile != raw.profile)) lastReady_ = {};
+    if (raw.limited || raw.keyModePending || raw.keyModeConflict || (lastReady_.ready &&
+        (lastReady_.profile != raw.profile || (lastReady_.analysisKeys > 0 && raw.analysisKeys > 0 &&
+            lastReady_.analysisKeys != raw.analysisKeys)))) lastReady_ = {};
     const bool fresh = raw.ready && !raw.limited && (raw.currentNps > 0 || raw.heldKeys > 0);
     if (fresh) lastReady_ = raw;
     else if (!raw.limited && lastReady_.ready) {
@@ -56,7 +58,7 @@ void PatternSummary::Observe(const Snapshot& current) {
         blocked_ = false;
         return;
     }
-    if (current.limited) blocked_ = true;
+    if (current.limited || current.keyModeConflict) blocked_ = true;
     if (!current.ready || current.retained || blocked_) return;
     const double value = current.profile == RatingProfile::Generic ? current.score : current.rating;
     const double best = peak_.profile == RatingProfile::Generic ? peak_.score : peak_.rating;
@@ -85,6 +87,7 @@ DifficultyEstimator::DifficultyEstimator(int lanes, double holdWeight)
 
 void DifficultyEstimator::Reset(int lanes) {
     lanes_ = std::clamp(lanes, 1, 256);
+    analysisKeys_ = 0;
     events_.clear();
     heldSince_.fill(-1.0);
     startedMs_ = lastDownMs_ = lastEventMs_ = overflowMs_ = -1.0;
@@ -100,7 +103,11 @@ void DifficultyEstimator::KeyDown(int lane, double timeMs) {
     if (lane < 0 || lane >= lanes_ || !std::isfinite(timeMs) || timeMs < 0.0 || timeMs < lastEventMs_) return;
     if (heldSince_[static_cast<std::size_t>(lane)] >= 0.0) return; // OS key repeat is not a new note.
     const bool holding = std::any_of(heldSince_.begin(), heldSince_.end(), [](double t) { return t >= 0.0; });
-    if (!holding && lastDownMs_ >= 0.0 && timeMs - lastDownMs_ >= IdleMs) Reset(lanes_);
+    if (!holding && lastDownMs_ >= 0.0 && timeMs - lastDownMs_ >= IdleMs) {
+        const int basis = analysisKeys_;
+        Reset(lanes_);
+        analysisKeys_ = basis;
+    }
     if (startedMs_ < 0.0) startedMs_ = timeMs;
     bool overlap = false;
     for (double held : heldSince_) if (held >= 0.0 && timeMs - held >= 90.0) overlap = true;
@@ -127,7 +134,8 @@ void DifficultyEstimator::KeyUp(int lane, double timeMs) {
 
 Snapshot DifficultyEstimator::Evaluate(double nowMs, bool includeIdleMetrics) const {
     Snapshot result;
-    result.profile = ProfileForKeys(lanes_);
+    result.analysisKeys = analysisKeys_ ? analysisKeys_ : lanes_;
+    result.profile = ProfileForKeys(result.analysisKeys);
     if (!std::isfinite(nowMs) || startedMs_ < 0.0) return result;
     nowMs = std::max(nowMs, lastEventMs_);
     result.heldKeys = static_cast<int>(std::count_if(heldSince_.begin(), heldSince_.end(), [](double t) { return t >= 0.0; }));
@@ -135,6 +143,15 @@ Snapshot DifficultyEstimator::Evaluate(double nowMs, bool includeIdleMetrics) co
     if (result.idle && !includeIdleMetrics) return result;
     result.limited = overflowMs_ >= 0.0 && nowMs - overflowMs_ < WindowMs;
 
+    // Sparse physical lane indices must not overflow the ten-lane combination
+    // mask when a 10K basis is selected from a larger registered layout.
+    std::array<int, 256> packedLane{};
+    std::bitset<256> usedLanes;
+    for (const auto& press : events_)
+        if (press.time > nowMs - WindowMs && press.time <= nowMs) usedLanes.set(press.lane);
+    int packed = 0;
+    for (int lane = 0; lane < lanes_; ++lane) if (usedLanes.test(lane)) packedLane[lane] = packed++;
+    result.keyModeConflict = analysisKeys_ && packed > analysisKeys_;
     std::vector<TimedNote> ratedNotes;
     std::bitset<256> chordLanes;
     double chordStart = -100000.0;
@@ -162,9 +179,10 @@ Snapshot DifficultyEstimator::Evaluate(double nowMs, bool includeIdleMetrics) co
         if (press.holdOverlap) ++overlapNotes;
         // Anchor each chord to its first press; never chain 15 ms gaps forever.
         // Repeated presses of one lane remain separate rows, even inside 15 ms.
-        if (rows.empty() || press.time - rows.back().time > 15.0 || rows.back().lanes.test(static_cast<std::size_t>(press.lane)))
+        const int featureLane = result.profile == RatingProfile::Osu10 ? packedLane[press.lane] : press.lane;
+        if (rows.empty() || press.time - rows.back().time > 15.0 || rows.back().lanes.test(static_cast<std::size_t>(featureLane)))
             rows.push_back({press.time, {}, 0});
-        rows.back().lanes.set(static_cast<std::size_t>(press.lane));
+        rows.back().lanes.set(static_cast<std::size_t>(featureLane));
         ++rows.back().size;
     }
     result.samples = times.size();
@@ -194,7 +212,7 @@ Snapshot DifficultyEstimator::Evaluate(double nowMs, bool includeIdleMetrics) co
     result.chordPercent = 100.0 * chordNotes / count;
     result.jackPercent = 100.0 * jackNotes / count;
     result.holdOverlapPercent = 100.0 * static_cast<double>(overlapNotes) / count;
-    result.ready = !result.idle && times.size() >= 8 && rows.size() >= 4 && nowMs - startedMs_ >= 1500.0 && !result.limited;
+    result.ready = !result.idle && times.size() >= 8 && rows.size() >= 4 && nowMs - startedMs_ >= 1500.0 && !result.limited && !result.keyModeConflict;
     if (result.ready) {
         result.stars = ManiaStars(ratedNotes, lanes_, std::max(0.0, nowMs - startedMs_ - WindowMs), holdWeight_);
         result.rating = result.stars;

@@ -1,0 +1,315 @@
+{
+  "name": "4K LN Dan Courses v2",
+  "creator": "_underjoy",
+  "courses": 15,
+  "statistic": "highest valid live-replay window; 100ms refresh plus pre-keydown and EOF; hold weight 2/3",
+  "assignment": "nearest reference band; reversed adjacent ranks pooled and shown as a range",
+  "evaluation": "reference construction only; no held-out or clear-prediction validation",
+  "sources": [
+    "https://osu.ppy.sh/beatmapsets/891143",
+    "https://osu.ppy.sh/beatmapsets/891152",
+    "https://osu.ppy.sh/beatmapsets/891157",
+    "https://osu.ppy.sh/beatmapsets/891164",
+    "https://osu.ppy.sh/beatmapsets/1116467"
+  ],
+  "measurements_sha256": "e120ae3b77bc129cda399fcd455219c0abd3320599c4825180aa8595e97f992c",
+  "bands": [
+    {
+      "strain": 2.3897437218679443,
+      "low": 1,
+      "high": 1
+    },
+    {
+      "strain": 2.737177800966808,
+      "low": 2,
+      "high": 2
+    },
+    {
+      "strain": 2.9857399703981686,
+      "low": 3,
+      "high": 4
+    },
+    {
+      "strain": 3.3077157822313956,
+      "low": 5,
+      "high": 5
+    },
+    {
+      "strain": 3.715290513401005,
+      "low": 6,
+      "high": 6
+    },
+    {
+      "strain": 4.15621312221851,
+      "low": 7,
+      "high": 7
+    },
+    {
+      "strain": 4.291946268783859,
+      "low": 8,
+      "high": 8
+    },
+    {
+      "strain": 4.333268521987282,
+      "low": 9,
+      "high": 9
+    },
+    {
+      "strain": 4.936583592436065,
+      "low": 10,
+      "high": 10
+    },
+    {
+      "strain": 5.168107759438825,
+      "low": 11,
+      "high": 11
+    },
+    {
+      "strain": 5.656997670710836,
+      "low": 12,
+      "high": 12
+    },
+    {
+      "strain": 5.745076659537376,
+      "low": 13,
+      "high": 13
+    },
+    {
+      "strain": 6.13557201017194,
+      "low": 14,
+      "high": 14
+    },
+    {
+      "strain": 6.434810241743463,
+      "low": 15,
+      "high": 15
+    }
+  ],
+  "references": [
+    {
+      "rank": 1,
+      "keys": 4,
+      "title": "4K LN Dan Courses v2 - Level 1 -",
+      "version": "1st Dan (Marathon)",
+      "creator": "_underjoy",
+      "beatmap_id": 1862813,
+      "beatmapset_id": 891143,
+      "sha256": "e25bae0312752936aa11a862d152960885ad0e14e47e521264b3c31fd1982ef3",
+      "events_sha256": "ea62d8dbc0e7a7c32738f0808b976afcb46291ecb9c3d73cbd85c4c2c6779dbf",
+      "notes": 1842,
+      "holds": 880,
+      "strain": 2.3897437218679443,
+      "nps": 9.875
+    },
+    {
+      "rank": 2,
+      "keys": 4,
+      "title": "4K LN Dan Courses v2 - Level 1 -",
+      "version": "2nd Dan (Marathon)",
+      "creator": "_underjoy",
+      "beatmap_id": 1862814,
+      "beatmapset_id": 891143,
+      "sha256": "5f0af1bc3e950bab03b37b939c72cd6af35507cafed5f611b227831a6318c6bd",
+      "events_sha256": "f86e8c06d37b951f3c7db292c89bb33e977d100397b6c7c03e56cc415f29796f",
+      "notes": 2792,
+      "holds": 2121,
+      "strain": 2.737177800966808,
+      "nps": 12.625
+    },
+    {
+      "rank": 3,
+      "keys": 4,
+      "title": "4K LN Dan Courses v2 - Level 1 -",
+      "version": "3rd Dan (Marathon)",
+      "creator": "_underjoy",
+      "beatmap_id": 1862815,
+      "beatmapset_id": 891143,
+      "sha256": "d076bdfc091ae8d8007db7ee6fa728ea5364eeee14e0903a69507c10d93c8e36",
+      "events_sha256": "4f565fe0baf56383ceb8a3cceff20d46ba9298e4577d94d0ef7fe36628289ba7",
+      "notes": 3526,
+      "holds": 1696,
+      "strain": 3.0859811810053035,
+      "nps": 12.75
+    },
+    {
+      "rank": 4,
+      "keys": 4,
+      "title": "4K LN Dan Courses v2 - Level 1 -",
+      "version": "4th Dan (Marathon)",
+      "creator": "_underjoy",
+      "beatmap_id": 1862816,
+      "beatmapset_id": 891143,
+      "sha256": "fa35c6ab0e7729de2634d5c03e42512b061affc9ad27d17538fee1b2d1b0070f",
+      "events_sha256": "a603f02b5976bd5f813a242fc7dd7e3e1b39f8735b0cd6b66e8263fd9e5ce0cd",
+      "notes": 3440,
+      "holds": 2548,
+      "strain": 2.8854987597910333,
+      "nps": 12.0
+    },
+    {
+      "rank": 5,
+      "keys": 4,
+      "title": "4K LN Dan Courses v2 - Level 2 -",
+      "version": "5th Dan (Marathon)",
+      "creator": "_underjoy",
+      "beatmap_id": 1862832,
+      "beatmapset_id": 891152,
+      "sha256": "3674262a04387d3bb9892323a0b009967e9b3a62222ba1cd33d36dee743cfa90",
+      "events_sha256": "102e615b46c26480d57e1a5a17f94642d90448630486dc229b31c90940e49ca5",
+      "notes": 5391,
+      "holds": 2972,
+      "strain": 3.3077157822313956,
+      "nps": 13.375
+    },
+    {
+      "rank": 6,
+      "keys": 4,
+      "title": "4K LN Dan Courses v2 - Level 2 -",
+      "version": "6th Dan (Marathon)",
+      "creator": "_underjoy",
+      "beatmap_id": 1862833,
+      "beatmapset_id": 891152,
+      "sha256": "e8c370d732a3184b20fa500485e6ec019f93d10399bb42f270e170feb44e1b46",
+      "events_sha256": "dc9a4035b2ca30c983aed711fa783b6cea3e74cb8fa5c05e7d47171d01de6865",
+      "notes": 4863,
+      "holds": 3185,
+      "strain": 3.715290513401005,
+      "nps": 17.125
+    },
+    {
+      "rank": 7,
+      "keys": 4,
+      "title": "4K LN Dan Courses v2 - Level 2 -",
+      "version": "7th Dan (Marathon)",
+      "creator": "_underjoy",
+      "beatmap_id": 1862834,
+      "beatmapset_id": 891152,
+      "sha256": "fe011c76e1f8080d130fc262379feb008a16df74d63a336d3d75f9df56f2285b",
+      "events_sha256": "0b7f1930639a8800c7e001c200cdb932cbe09522286f1e5792146d8cc3e50bb1",
+      "notes": 5011,
+      "holds": 3086,
+      "strain": 4.15621312221851,
+      "nps": 17.625
+    },
+    {
+      "rank": 8,
+      "keys": 4,
+      "title": "4K LN Dan Courses v2 - Level 3 -",
+      "version": "8th Dan (Marathon)",
+      "creator": "_underjoy",
+      "beatmap_id": 1862842,
+      "beatmapset_id": 891157,
+      "sha256": "faa9659b4afd48634024a85d3301248cccef384adb787eb93ad16c70dcb3988b",
+      "events_sha256": "01feefb537076a6948878de8868e25e17768b38247cf8f73e617c8ab7feefd6a",
+      "notes": 5715,
+      "holds": 4449,
+      "strain": 4.291946268783859,
+      "nps": 19.375
+    },
+    {
+      "rank": 9,
+      "keys": 4,
+      "title": "4K LN Dan Courses v2 - Level 3 -",
+      "version": "9th Dan (Marathon)",
+      "creator": "_underjoy",
+      "beatmap_id": 1862843,
+      "beatmapset_id": 891157,
+      "sha256": "ae8ef8364d5d05fccf2ed5d6571bcfe05bfe7ccbdb1a42bf3a8fb0b8cff01f77",
+      "events_sha256": "bd46369546fcf18b05d4111cc10a6d0fc6901f787ac6722a4746e5ba37d8fabc",
+      "notes": 7589,
+      "holds": 5197,
+      "strain": 4.333268521987282,
+      "nps": 18.75
+    },
+    {
+      "rank": 10,
+      "keys": 4,
+      "title": "4K LN Dan Courses v2 - Level 3 -",
+      "version": "10th Dan (Marathon)",
+      "creator": "_underjoy",
+      "beatmap_id": 1862841,
+      "beatmapset_id": 891157,
+      "sha256": "9e9d59bdc8a2c38713d12954f20fc6b904582d6f2293299b535f2af2ea27d2a7",
+      "events_sha256": "1b63d4bf7d8c30b05f54fb4ad4662a87e1616cf0a1403444e320bd2f53b6c8d7",
+      "notes": 7907,
+      "holds": 6159,
+      "strain": 4.936583592436065,
+      "nps": 18.625
+    },
+    {
+      "rank": 11,
+      "keys": 4,
+      "title": "4K LN Dan Courses v2 - Extra Level -",
+      "version": "11th Dan - Yoake (Marathon)",
+      "creator": "_underjoy",
+      "beatmap_id": 1862874,
+      "beatmapset_id": 891164,
+      "sha256": "b68cf40da359afc4766d270a59561c8f6fe507a5a075be619ed13dd19aff1144",
+      "events_sha256": "cd745aee34b58681b060628afce351bf44ec132ac1a8a13f0027b175a3c655d8",
+      "notes": 8224,
+      "holds": 6750,
+      "strain": 5.168107759438825,
+      "nps": 20.625
+    },
+    {
+      "rank": 12,
+      "keys": 4,
+      "title": "4K LN Dan Courses v2 - Extra Level -",
+      "version": "12th Dan - Yuugure (Marathon)",
+      "creator": "_underjoy",
+      "beatmap_id": 1862875,
+      "beatmapset_id": 891164,
+      "sha256": "c6a624bdf9d469786524e6661682bfeeed56064e2b5388761060ae8200301ca6",
+      "events_sha256": "aa65909a3ab48c6cac5621449fa02ffdba57e156ebceafa710598e422d861a28",
+      "notes": 8702,
+      "holds": 7037,
+      "strain": 5.656997670710836,
+      "nps": 22.75
+    },
+    {
+      "rank": 13,
+      "keys": 4,
+      "title": "4K LN Dan Courses v2 - Extra Level -",
+      "version": "13th Dan - Yoru (Marathon)",
+      "creator": "_underjoy",
+      "beatmap_id": 1862876,
+      "beatmapset_id": 891164,
+      "sha256": "cd0fec32121b1bcee5b76e1e0a975dd28d71c5cc51fc2fed21c58e9f7d607390",
+      "events_sha256": "b57b6393a382324fbef114e98df0d0586367935aab33c67b3067e3ffa7f54db6",
+      "notes": 9963,
+      "holds": 7677,
+      "strain": 5.745076659537376,
+      "nps": 27.25
+    },
+    {
+      "rank": 14,
+      "keys": 4,
+      "title": "4K LN Dan Courses v2 - FINAL -",
+      "version": "14th Dan - Yami (Marathon)",
+      "creator": "_underjoy",
+      "beatmap_id": 2332319,
+      "beatmapset_id": 1116467,
+      "sha256": "c9153781895ee7a43cf6e9046ee75ace49a989f012e9f695f107fb5769ca4431",
+      "events_sha256": "3818ec071cb8fcd13d0fe4f6f439e7c04fa98bb746b0a9e66d4fbf744d98f499",
+      "notes": 9368,
+      "holds": 7632,
+      "strain": 6.13557201017194,
+      "nps": 25.875
+    },
+    {
+      "rank": 15,
+      "keys": 4,
+      "title": "4K LN Dan Courses v2 - FINAL -",
+      "version": "15th Dan - Yume (Marathon)",
+      "creator": "_underjoy",
+      "beatmap_id": 2332320,
+      "beatmapset_id": 1116467,
+      "sha256": "7ccd874d656637f75c100056d9f7e179a89e71a003bfd43460b05995a0b210eb",
+      "events_sha256": "773d28edf9f625147e6caf5b7557c00a98537d0510f77b317ef68b18e88d85f1",
+      "notes": 12852,
+      "holds": 10829,
+      "strain": 6.434810241743463,
+      "nps": 24.625
+    }
+  ]
+}

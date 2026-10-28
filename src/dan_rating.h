@@ -17,6 +17,10 @@ struct DanEstimate {
 // This does not evaluate course accuracy, misses, endurance or clear requirements.
 DanEstimate EstimateDan(RatingProfile profile, double comparisonLoad);
 DanEstimate EstimateDan(const Snapshot& snapshot);
+// Independent 4K LN v2 reference comparison; never replaces Reform or mixes
+// their rank ladders. Like the main estimate, this is not a clear prediction.
+DanEstimate EstimateLnDan(const Snapshot& snapshot);
+std::wstring FormatLnDan(const Snapshot& snapshot);
 std::wstring DanLabel(RatingProfile profile, int rank);
 std::wstring FormatDan(RatingProfile profile, const DanEstimate& estimate);
 const wchar_t* DanBasis(RatingProfile profile);
